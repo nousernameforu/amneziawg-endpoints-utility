@@ -1,0 +1,60 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 2080
+    }
+  ],
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "awg-server",
+      "address": ["10.3.2.1/24", "fd42:3:2::1/64"],
+      "private_key": "aM7VNBnJ7hRRRtmVJcCyzy7DYbjbnJGMzT4hLPZnlWc=",
+      "listen_port": 62230,
+      "mtu": 1280,
+      "jc": 5,
+      "jmin": 117,
+      "jmax": 450,
+      "s1": 116,
+      "s2": 141,
+      "s3": 73,
+      "s4": 72,
+      "h1": "39602205-139602204",
+      "h2": "809649713-909649712",
+      "h3": "1093729086-1193729085",
+      "h4": "1795310211-1895310210",
+      "i1": "<b 0xcd00000001><r 12><r 40>",
+      "i2": "<b 0xcf00000001><rd 8><r 28>",
+      "i3": "<b 0x06><r 64>",
+      "i4": "<b 0x52><t><r 48>",
+      "i5": "<b 0xcd><r 96>",
+      "peers": [
+        {
+          "public_key": "T1LqXlWxDx4pMBqXcJ0pM0FiOVFPYOkYW+CkxYYYNz4=",
+          "pre_shared_key": "zkxTlDMD8GBNXOSEu4YHye2GOo14arItnNs/cqiahLg=",
+          "allowed_ips": ["10.3.2.2/32", "fd42:3:2::2/128"]
+        },
+        {
+          "public_key": "mF7Y0kK8ZQ1vPqLxN3sJdR5tWc2hGbA9eU4iOpX6YnM=",
+          "pre_shared_key": "8bQxKmR3vN7pTzL5wCdE9fHjA2sYuI4oP6gVnB1XZkQ=",
+          "allowed_ips": ["10.3.2.3/32", "fd42:3:2::3/128"]
+        }
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "direct"
+  }
+}

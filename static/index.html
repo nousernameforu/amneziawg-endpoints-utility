@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AmneziaWG clients — sing-box</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">
+    <strong>AmneziaWG clients</strong>
+    <span class="paths">
+      <span id="path-config" title="sing-box config">…</span>
+      <span id="path-vault" title="key sidecar">…</span>
+    </span>
+  </div>
+  <div class="actions">
+    <span id="issue-badge" class="pill hidden" title="open Server endpoint to see details"></span>
+    <span id="dirty" class="pill hidden">unsaved changes</span>
+    <button id="btn-reload" class="ghost">Reload</button>
+    <button id="btn-save" class="primary">Save</button>
+    <button id="btn-restart" class="ghost hidden">Restart sing-box</button>
+  </div>
+</header>
+
+<div id="toast" class="hidden"></div>
+
+<main>
+  <nav id="endpoint-tabs"></nav>
+
+  <div id="editor" class="hidden">
+
+    <section class="panel hero">
+      <div class="panel-head">
+        <h2>Clients <span class="sub" id="peer-count"></span></h2>
+        <div>
+          <input id="add-count" class="mono count" type="number" min="1" max="50" value="1"
+                 title="how many clients to create">
+          <button id="btn-add-peer" class="primary">Add client</button>
+          <button id="btn-bundle" class="ghost">Download all</button>
+        </div>
+      </div>
+      <p class="lead">
+        Each client gets its own keypair, preshared key and free address pair automatically.
+        Private keys live in the sidecar, never in <code>config.json</code>.
+      </p>
+      <div id="peers"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Client template <span class="sub">shared by every generated .conf</span></h2>
+      <div class="grid" id="client-grid"></div>
+      <h3>Packet templates <span class="sub">I1–I5 as written to the .conf — independent of the server's</span></h3>
+      <div class="grid one" id="client-i-grid"></div>
+    </section>
+
+    <details class="panel" id="server-panel">
+      <summary>
+        <h2>Server endpoint <span class="sub">what goes into config.json</span></h2>
+        <span id="summary-hint" class="sub"></span>
+      </summary>
+
+      <div class="details-body">
+        <h3>Interface</h3>
+        <div class="grid" id="iface-grid"></div>
+
+        <h3>Obfuscation</h3>
+        <div class="grid tight" id="awg-grid"></div>
+
+        <h3>Packet templates <span class="sub">i1–i5, what the server emits</span></h3>
+        <div class="grid one" id="awg-i-grid"></div>
+
+        <h3>Validation</h3>
+        <ul id="issues"></ul>
+
+        <h3 class="with-actions">
+          config.json preview
+          <span>
+            <button class="ghost tiny" data-copy="#preview">Copy</button>
+            <button class="ghost tiny" id="btn-dl-config">Download</button>
+          </span>
+        </h3>
+        <pre id="preview"></pre>
+      </div>
+    </details>
+
+  </div>
+
+  <div id="empty" class="panel hidden">
+    <p>No <code>wireguard</code> endpoints in this config.</p>
+    <button id="btn-add-endpoint-empty" class="primary">Create one</button>
+  </div>
+</main>
+
+<div id="modal" class="hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="modal-title">Client config</h2>
+      <div>
+        <button class="ghost" data-copy="#modal-body">Copy</button>
+        <button class="ghost" id="modal-download">Download</button>
+        <button class="ghost" id="modal-close">Close</button>
+      </div>
+    </div>
+    <pre id="modal-body"></pre>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
