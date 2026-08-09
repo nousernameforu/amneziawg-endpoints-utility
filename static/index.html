@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AmneziaWG clients — sing-box</title>
+<title data-i18n="app.title">AmneziaWG clients</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <header id="topbar">
   <div class="brand">
-    <strong>AmneziaWG clients</strong>
+    <strong data-i18n="app.title">AmneziaWG clients</strong>
     <span class="paths">
       <span id="path-config" title="sing-box config">…</span>
       <span id="path-vault" title="key sidecar">…</span>
@@ -18,12 +18,13 @@
   </div>
   <div class="actions">
     <span id="comment-note" class="pill hidden"
-          title="Comments outside the endpoints array are preserved on save. Comments inside it are not.">JSONC</span>
-    <span id="issue-badge" class="pill hidden" title="open Server endpoint to see details"></span>
-    <span id="dirty" class="pill hidden">unsaved changes</span>
-    <button id="btn-reload" class="ghost">Reload</button>
-    <button id="btn-save" class="primary">Save</button>
-    <button id="btn-restart" class="ghost hidden">Restart sing-box</button>
+          data-i18n="hdr.jsonc" data-i18n-title="hdr.jsonc_title">JSONC</span>
+    <span id="issue-badge" class="pill hidden" data-i18n-title="hdr.issues_title"></span>
+    <span id="dirty" class="pill hidden" data-i18n="hdr.unsaved">unsaved changes</span>
+    <select id="lang" class="lang" data-i18n-title="hdr.language_title"></select>
+    <button id="btn-reload" class="ghost" data-i18n="hdr.reload">Reload</button>
+    <button id="btn-save" class="primary" data-i18n="hdr.save">Save</button>
+    <button id="btn-restart" class="ghost hidden" data-i18n="hdr.restart">Restart sing-box</button>
   </div>
 </header>
 
@@ -36,52 +37,54 @@
 
     <section class="panel hero">
       <div class="panel-head">
-        <h2>Clients <span class="sub" id="peer-count"></span></h2>
+        <h2><span data-i18n="clients.title">Clients</span> <span class="sub" id="peer-count"></span></h2>
         <div>
           <input id="add-count" class="mono count" type="number" min="1" max="50" value="1"
-                 title="how many clients to create">
-          <button id="btn-add-peer" class="primary">Add client</button>
-          <button id="btn-bundle" class="ghost">Download all</button>
+                 data-i18n-title="clients.add_count_title">
+          <button id="btn-add-peer" class="primary" data-i18n="clients.add">Add client</button>
+          <button id="btn-bundle" class="ghost" data-i18n="clients.download_all">Download all</button>
         </div>
       </div>
-      <p class="lead">
-        Each client gets its own keypair, preshared key and free address pair automatically.
-        Private keys live in the sidecar, never in <code>config.json</code>.
-      </p>
+      <p class="lead" data-i18n="clients.lead"></p>
       <div id="peers"></div>
     </section>
 
     <section class="panel">
-      <h2>Client template <span class="sub">shared by every generated .conf</span></h2>
+      <h2><span data-i18n="tmpl.title">Client template</span>
+          <span class="sub" data-i18n="tmpl.sub"></span></h2>
       <div class="grid" id="client-grid"></div>
-      <h3>Packet templates <span class="sub">I1–I5 as written to the .conf — independent of the server's</span></h3>
+      <h3><span data-i18n="tmpl.packets">Packet templates</span>
+          <span class="sub" data-i18n="tmpl.packets_sub"></span></h3>
       <div class="grid one" id="client-i-grid"></div>
     </section>
 
     <details class="panel" id="server-panel">
       <summary>
-        <h2>Server endpoint <span class="sub">what goes into config.json</span></h2>
+        <h2><span data-i18n="srv.title">Server endpoint</span>
+            <span class="sub" data-i18n="srv.sub"></span></h2>
         <span id="summary-hint" class="sub"></span>
       </summary>
 
       <div class="details-body">
-        <h3>Interface</h3>
+        <h3 data-i18n="srv.interface">Interface</h3>
         <div class="grid" id="iface-grid"></div>
 
-        <h3>Obfuscation</h3>
+        <h3 data-i18n="srv.obfuscation">Obfuscation</h3>
         <div class="grid tight" id="awg-grid"></div>
 
-        <h3>Packet templates <span class="sub">i1–i5, what the server emits</span></h3>
+        <h3><span data-i18n="srv.packets">Packet templates</span>
+            <span class="sub" data-i18n="srv.packets_sub"></span></h3>
         <div class="grid one" id="awg-i-grid"></div>
 
-        <h3>Validation</h3>
+        <h3 data-i18n="srv.validation">Validation</h3>
         <ul id="issues"></ul>
+        <p id="no-issues" class="ok-note hidden" data-i18n="srv.no_issues"></p>
 
         <h3 class="with-actions">
-          config.json preview
+          <span data-i18n="srv.preview">config.json preview</span>
           <span>
-            <button class="ghost tiny" data-copy="#preview">Copy</button>
-            <button class="ghost tiny" id="btn-dl-config">Download</button>
+            <button class="ghost tiny" data-copy="#preview" data-i18n="common.copy">Copy</button>
+            <button class="ghost tiny" id="btn-dl-config" data-i18n="common.download">Download</button>
           </span>
         </h3>
         <pre id="preview"></pre>
@@ -91,19 +94,19 @@
   </div>
 
   <div id="empty" class="panel hidden">
-    <p>No <code>wireguard</code> endpoints in this config.</p>
-    <button id="btn-add-endpoint-empty" class="primary">Create one</button>
+    <p data-i18n="empty.none">No wireguard endpoints in this config.</p>
+    <button id="btn-add-endpoint-empty" class="primary" data-i18n="empty.create">Create one</button>
   </div>
 </main>
 
 <div id="modal" class="hidden">
   <div class="modal-box">
     <div class="modal-head">
-      <h2 id="modal-title">Client config</h2>
+      <h2 id="modal-title" data-i18n="modal.title">Client config</h2>
       <div>
-        <button class="ghost" data-copy="#modal-body">Copy</button>
-        <button class="ghost" id="modal-download">Download</button>
-        <button class="ghost" id="modal-close">Close</button>
+        <button class="ghost" data-copy="#modal-body" data-i18n="common.copy">Copy</button>
+        <button class="ghost" id="modal-download" data-i18n="common.download">Download</button>
+        <button class="ghost" id="modal-close" data-i18n="common.close">Close</button>
       </div>
     </div>
     <pre id="modal-body"></pre>

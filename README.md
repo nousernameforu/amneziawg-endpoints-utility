@@ -61,6 +61,7 @@ sudo -u awg-endpoints python3 /opt/awg-endpoints/server.py \
 | `keep_backups` | `10` | timestamped copies of `config.json` |
 | `read_only` | `false` | serve the editor, refuse to write |
 | `restart_cmd` | — | command behind the Restart button |
+| `language` | `en` | default UI language |
 | `tls.cert` / `tls.key` | — | serve HTTPS |
 | `allow_insecure` | `false` | permit a non-loopback bind with no auth |
 
@@ -73,6 +74,44 @@ Generate a password hash with:
 ```bash
 python3 /opt/awg-endpoints/server.py --hash-password
 ```
+
+## Language
+
+Ships with English and Russian. `install.sh` asks which to use as the default,
+or takes `--language ru`; it is stored as `language` in the config file.
+
+Each browser can override that with the picker in the header, and the choice is
+remembered locally — so the server default is what a new visitor sees, not a
+lock. Order of preference: the picker's remembered choice, then `language` from
+the config, then the browser's own `Accept-Language` if it matches a shipped
+locale, then English.
+
+### Adding a language
+
+Drop a file in `static/i18n/`. Copy `en.json`, translate the values, set `_name`
+to the language's name in itself (it goes straight into the picker) and `_code`
+to match the filename. The server enumerates that directory at request time, so
+nothing else needs changing.
+
+Keys missing from a locale fall back to English rather than showing raw key
+names, so a partial translation is usable from the first string. To check one:
+
+```bash
+python3 - <<'EOF'
+import json, glob
+en = json.load(open('static/i18n/en.json', encoding='utf-8'))
+for f in glob.glob('static/i18n/*.json'):
+    d = json.load(open(f, encoding='utf-8'))
+    missing = [k for k in en if k not in d]
+    print(f, 'missing:', missing or 'nothing')
+EOF
+```
+
+Note that config keys (`jc`, `s1`, `allowed_ips`, `PersistentKeepalive` …) are
+deliberately **not** translated — they are the literal names in the files being
+edited, and translating them would make the UI harder to map onto sing-box's
+documentation, not easier. Generated `.conf` files are unaffected by the UI
+language.
 
 ### Which user does it run as
 

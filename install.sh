@@ -24,6 +24,7 @@ ADMIN_USER=admin
 PASSWORD=""
 WITH_RESTART=""
 ASSUME_YES=""
+LANGUAGE=""
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -37,6 +38,7 @@ Usage: sudo ./install.sh [options]
   --password PASS     admin password (default: prompt; use - to read stdin)
   --config PATH       sing-box config (default: $SB_CONFIG)
   --vault PATH        key sidecar (default: $SB_VAULT)
+  --language CODE     default UI language, e.g. en or ru (default: prompt)
   --service-user NAME system user to run as (default: $SVC_USER)
   --sing-box-unit U   sing-box unit name (default: $SB_SERVICE)
   --with-restart      allow the app to restart sing-box (installs a sudoers rule)
@@ -59,6 +61,7 @@ while [ $# -gt 0 ]; do
     --password)      PASSWORD="$2"; shift 2 ;;
     --config)        SB_CONFIG="$2"; shift 2 ;;
     --vault)         SB_VAULT="$2"; shift 2 ;;
+    --language)      LANGUAGE="$2"; shift 2 ;;
     --service-user)  SVC_USER="$2"; shift 2 ;;
     --sing-box-unit) SB_SERVICE="$2"; shift 2 ;;
     --with-restart)  WITH_RESTART=yes; shift ;;
@@ -95,6 +98,29 @@ elif [ -z "$PASSWORD" ]; then
 fi
 [ -n "$PASSWORD" ] || die "empty password"
 
+# Offer whatever locale files are actually shipped, rather than a fixed list.
+LANG_CODES="$(for f in "$SRC_DIR"/static/i18n/*.json; do
+                [ -e "$f" ] || continue; basename "$f" .json; done | tr '\n' ' ')"
+LANG_CODES="${LANG_CODES% }"
+[ -n "$LANG_CODES" ] || LANG_CODES=en
+
+if [ -n "$LANGUAGE" ]; then
+  case " $LANG_CODES " in
+    *" $LANGUAGE "*) ;;
+    *) die "unknown language '$LANGUAGE'; available: $LANG_CODES" ;;
+  esac
+elif [ -n "$ASSUME_YES" ] || [ ! -t 0 ]; then
+  LANGUAGE=en
+else
+  printf 'Default interface language [%s] (default: en): ' "$LANG_CODES" >&2
+  read -r LANGUAGE
+  LANGUAGE="${LANGUAGE:-en}"
+  case " $LANG_CODES " in
+    *" $LANGUAGE "*) ;;
+    *) die "unknown language '$LANGUAGE'; available: $LANG_CODES" ;;
+  esac
+fi
+
 if [ -z "$WITH_RESTART" ]; then
   if [ -n "$ASSUME_YES" ] || [ ! -t 0 ]; then
     WITH_RESTART=no
@@ -124,8 +150,9 @@ install -d -m 0755 "$PREFIX"
 install -m 0644 "$SRC_DIR/server.py"  "$PREFIX/server.py"
 install -m 0644 "$SRC_DIR/README.md"  "$PREFIX/README.md" 2>/dev/null || true
 rm -rf "$PREFIX/static"
-install -d -m 0755 "$PREFIX/static"
-install -m 0644 "$SRC_DIR"/static/* "$PREFIX/static/"
+install -d -m 0755 "$PREFIX/static" "$PREFIX/static/i18n"
+install -m 0644 "$SRC_DIR"/static/*.* "$PREFIX/static/"
+install -m 0644 "$SRC_DIR"/static/i18n/*.json "$PREFIX/static/i18n/"
 say "installed to $PREFIX"
 
 # --- credentials -------------------------------------------------------------
@@ -180,6 +207,7 @@ text = setval(text, "port",            "$PORT")
 text = setval(text, "user",            '"$ADMIN_USER"')
 text = setval(text, "password",        '"$HASH"')
 text = setval(text, "restart_cmd",     '"$RESTART_CMD"')
+text = setval(text, "language",        '"$LANGUAGE"')
 open(dst, "w", encoding="utf-8").write(text)
 PY
 chown root:"$SVC_GROUP" "$CONF_FILE"

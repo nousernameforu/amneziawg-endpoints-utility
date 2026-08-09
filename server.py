@@ -428,6 +428,27 @@ def _prune_backups(path, keep):
 
 EMPTY_VAULT = {"version": 1, "endpoints": {}}
 
+I18N_DIR = os.path.join(STATIC_DIR, "i18n")
+
+
+def available_languages():
+    """Every locale file in static/i18n, by its declared name. Adding a
+    language is dropping a JSON file in that directory."""
+    out = []
+    if not os.path.isdir(I18N_DIR):
+        return out
+    for name in sorted(os.listdir(I18N_DIR)):
+        if not name.endswith(".json"):
+            continue
+        code = name[:-5]
+        try:
+            with open(os.path.join(I18N_DIR, name), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append({"code": data.get("_code", code), "name": data.get("_name", code)})
+    return out
+
 
 # --------------------------------------------------------------------------
 # Basic auth
@@ -701,6 +722,8 @@ class Handler(BaseHTTPRequestHandler):
                 "read_only": opts.read_only,
                 "restart_enabled": bool(opts.restart_cmd),
                 "restart_cmd": opts.restart_cmd or "",
+                "language": opts.language,
+                "languages": available_languages(),
                 "errors": errors,
             },
         })
@@ -797,6 +820,7 @@ SETTING_DEFAULTS = {
     "read_only": False,
     "restart_cmd": "",
     "allow_insecure": False,
+    "language": "en",
     "auth": {"user": "", "password": "", "password_file": ""},
     "tls": {"cert": "", "key": ""},
 }
@@ -862,6 +886,8 @@ def build_options(argv):
     ap.add_argument("--tls-key", default=None, help="PEM private key for --tls-cert")
     ap.add_argument("--allow-insecure", action="store_true", default=None,
                     help="permit binding a non-loopback address without auth")
+    ap.add_argument("--language", default=None,
+                    help="default UI language, e.g. en or ru")
     args = ap.parse_args(argv)
 
     if args.hash_password:
@@ -872,12 +898,15 @@ def build_options(argv):
     file_tls = settings.get("tls", {})
 
     def pick(name, cli_value, section=None):
-        """Command line beats the config file beats the built-in default."""
+        """Command line beats the config file beats the built-in default.
+
+        `section` is a key name, not a dict — an empty section is falsy, which
+        made an earlier version of this silently look in the wrong place.
+        """
         if cli_value is not None:
             return cli_value
-        if section:
-            return section.get(name, SETTING_DEFAULTS[
-                "auth" if section is file_auth else "tls"][name])
+        if section is not None:
+            return settings.get(section, {}).get(name, SETTING_DEFAULTS[section][name])
         return settings.get(name, SETTING_DEFAULTS[name])
 
     opts = argparse.Namespace(
@@ -890,10 +919,11 @@ def build_options(argv):
         read_only=bool(pick("read_only", args.read_only)),
         restart_cmd=pick("restart_cmd", args.restart_cmd),
         allow_insecure=bool(pick("allow_insecure", args.allow_insecure)),
-        tls_cert=pick("cert", args.tls_cert, file_tls),
-        tls_key=pick("key", args.tls_key, file_tls),
+        language=pick("language", args.language),
+        tls_cert=pick("cert", args.tls_cert, "tls"),
+        tls_key=pick("key", args.tls_key, "tls"),
         auth=args.auth,
-        auth_file=pick("password_file", args.auth_file, file_auth),
+        auth_file=pick("password_file", args.auth_file, "auth"),
         file_auth_user=file_auth.get("user", ""),
         file_auth_password=file_auth.get("password", ""),
         hash_password=False,
@@ -923,6 +953,10 @@ def main(argv=None):
 
     creds = load_credentials(opts)
 
+    codes = [l["code"] for l in available_languages()]
+    if codes and opts.language not in codes:
+        sys.exit("unknown language %r; available: %s" % (opts.language, ", ".join(codes)))
+
     # sing-box is commonly run as `sing-box run -C /etc/sing-box`, which loads
     # every *.json in that directory. A vault living there would be parsed as
     # config and take the daemon down on its next restart.
@@ -936,6 +970,7 @@ def main(argv=None):
         print("  vault  : %s" % opts.vault)
         print("  auth   : %s" % ("user '%s'" % creds[0] if creds else "NONE"))
         print("  restart: %s" % (opts.restart_cmd or "disabled"))
+        print("  language: %s (available: %s)" % (opts.language, ", ".join(codes) or "none"))
         for label, path in (("sing_box_config", opts.config), ("vault", opts.vault)):
             if not os.path.exists(path):
                 print("  note   : %s does not exist yet (%s)" % (label, path))

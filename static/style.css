@@ -173,9 +173,22 @@ h3.with-actions span { display: flex; gap: 6px; }
 
 /* ---------- misc ---------- */
 
+select.lang {
+  font: inherit;
+  font-size: 13px;
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+select.lang:hover { border-color: var(--accent); }
+select.lang option { background: var(--panel-2); color: var(--fg); }
+
 #issues { margin: 0; padding-left: 18px; }
-#issues:empty::after { content: "No problems found."; color: var(--good); }
 #issues li { margin: 3px 0; }
+.ok-note { color: var(--good); margin: 0; }
 #issues li.warn { color: var(--warn); }
 #issues li.err { color: var(--bad); }
 

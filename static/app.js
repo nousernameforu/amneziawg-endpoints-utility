@@ -8,7 +8,65 @@ const S = {
   meta: {},
   sel: 0,            // index into S.config.endpoints
   dirty: false,
+  lang: 'en',
+  strings: {},       // active locale
+  fallback: {},      // English, for keys a locale has not translated yet
 };
+
+/* ------------------------------------------------------------------- i18n */
+
+const LANG_KEY = 'awg-endpoints-lang';
+
+/** Look up a key, filling {placeholders}. Falls back to English, then the key. */
+function t(key, vars) {
+  let s = S.strings[key];
+  if (s === undefined) s = S.fallback[key];
+  if (s === undefined) return key;
+  if (!vars) return s;
+  return s.replace(/\{(\w+)\}/g, (m, name) => (name in vars ? String(vars[name]) : m));
+}
+
+async function fetchLocale(code) {
+  const res = await fetch('/i18n/' + encodeURIComponent(code) + '.json');
+  if (!res.ok) throw new Error('no locale ' + code);
+  return res.json();
+}
+
+async function setLanguage(code, remember) {
+  try {
+    S.strings = await fetchLocale(code);
+    S.lang = code;
+  } catch {
+    S.strings = S.fallback;      // unknown locale: stay in English
+    S.lang = 'en';
+  }
+  if (remember) localStorage.setItem(LANG_KEY, S.lang);
+  document.documentElement.lang = S.lang;
+  applyStaticText();
+  if (S.config) render();       // re-render everything the JS built
+}
+
+/** Translate the markup: textContent for data-i18n, title for data-i18n-title. */
+function applyStaticText() {
+  document.querySelectorAll('[data-i18n]').forEach((n) => {
+    n.textContent = t(n.dataset.i18n);
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach((n) => {
+    n.title = t(n.dataset.i18nTitle);
+  });
+}
+
+function renderLanguagePicker() {
+  const sel = $('#lang');
+  sel.innerHTML = '';
+  (S.meta.languages || [{ code: 'en', name: 'English' }]).forEach((l) => {
+    const o = el('option', null, l.name);
+    o.value = l.code;
+    if (l.code === S.lang) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.classList.toggle('hidden', (S.meta.languages || []).length < 2);
+}
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (tag, cls, text) => {
@@ -112,7 +170,7 @@ function parseCidr(s) {
 
 /** Lowest offset >= 2 whose v4 and v6 host addresses are both unused. */
 function nextFreeAddresses(e) {
-  const list = Array.isArray(e.address) ? e.address : [];
+  const list = asList(e.address);
   const c4 = list.map(parseCidr).find((c) => c && c.v === 4);
   const c6 = list.map(parseCidr).find((c) => c && c.v === 6);
 
@@ -124,7 +182,8 @@ function nextFreeAddresses(e) {
     else used6.add(v6ToBig(c.addr).toString());
   };
   list.forEach(note);
-  (e.peers || []).forEach((p) => (p.allowed_ips || []).forEach(note));
+  (Array.isArray(e.peers) ? e.peers : []).forEach(
+    (p) => asList(p.allowed_ips).forEach(note));
 
   const net4 = c4 ? (ip4ToInt(c4.addr) & (c4.prefix === 0 ? 0 : (-1 << (32 - c4.prefix)) >>> 0)) >>> 0 : null;
   const max4 = c4 ? (c4.prefix >= 31 ? 0 : Math.pow(2, 32 - c4.prefix) - 2) : 0;
@@ -214,8 +273,31 @@ const num = (v) => {
   const n = Number(t);
   return Number.isFinite(n) ? n : t;
 };
-const listGet = (arr) => (Array.isArray(arr) ? arr.join(', ') : (arr || ''));
+
+/**
+ * sing-box accepts a bare value anywhere it accepts a list, so "10.3.2.2/32"
+ * and ["10.3.2.2/32"] are both legal in the file. Everything here works in
+ * arrays; this is the funnel.
+ */
+function asList(v) {
+  if (v === undefined || v === null || v === '') return [];
+  if (Array.isArray(v)) return v.filter((x) => x !== null && x !== undefined);
+  if (typeof v === 'object') return [v];
+  return String(v).split(',').map((x) => x.trim()).filter(Boolean);
+}
+
+const listGet = (v) => asList(v).join(', ');
 const listSet = (s) => String(s).split(',').map((x) => x.trim()).filter(Boolean);
+
+/** Coerce the listable fields we touch, so the rest of the code can assume arrays. */
+function normalizeConfig() {
+  endpoints().forEach((e) => {
+    if (!isWg(e)) return;
+    e.address = asList(e.address);
+    if (!Array.isArray(e.peers)) e.peers = e.peers ? [e.peers] : [];
+    e.peers.forEach((p) => { p.allowed_ips = asList(p.allowed_ips); });
+  });
+}
 
 /* ----------------------------------------------------------------- render */
 
@@ -228,13 +310,13 @@ function renderTabs() {
     b.addEventListener('click', () => { S.sel = i; render(); });
     nav.appendChild(b);
   });
-  const add = el('button', 'ghost', '+ endpoint');
+  const add = el('button', 'ghost', t('iface.add_endpoint'));
   add.addEventListener('click', addEndpoint);
   nav.appendChild(add);
 
   const others = endpoints().filter((e) => !isWg(e)).length;
   if (others) {
-    const note = el('span', 'sub', `${others} non-wireguard endpoint${others > 1 ? 's' : ''} left untouched`);
+    const note = el('span', 'sub', t('iface.others_untouched', { n: others }));
     note.style.alignSelf = 'center';
     nav.appendChild(note);
   }
@@ -260,7 +342,7 @@ function renderInterface() {
   field(g, { label: 'mtu', get: () => e.mtu, set: (v) => { e.mtu = num(v); } });
 
   field(g, {
-    label: 'address', hint: 'comma separated', wide: true,
+    label: 'address', hint: t('hint.comma'), wide: true,
     placeholder: '10.3.2.1/24, fd42:3:2::1/64',
     get: () => listGet(e.address), set: (v) => { e.address = listSet(v); },
   });
@@ -269,19 +351,19 @@ function renderInterface() {
   const renderPub = () => {
     const pub = vEp().server_public_key;
     pubLine.innerHTML = '';
-    pubLine.appendChild(el('span', null, 'public key: '));
-    pubLine.appendChild(el('b', null, pub || '— derive it from the private key —'));
+    pubLine.appendChild(el('span', null, t('iface.pubkey')));
+    pubLine.appendChild(el('b', null, pub || t('iface.pubkey_missing')));
   };
   renderPub();
 
   field(g, {
-    label: 'private_key', hint: 'server', wide: true,
+    label: 'private_key', hint: t('hint.server'), wide: true,
     get: () => e.private_key,
     set: (v) => { e.private_key = v.trim(); },
     footer: pubLine,
     buttons: [
       {
-        label: 'Generate', title: 'New X25519 keypair for the server',
+        label: t('common.generate'), title: t('iface.generate_title'),
         onClick: async (input) => {
           const kp = await api('/api/keypair', {});
           e.private_key = kp.private_key;
@@ -292,7 +374,7 @@ function renderInterface() {
         },
       },
       {
-        label: 'Derive pub', title: 'Recompute the public key from the private key',
+        label: t('iface.derive'), title: t('iface.derive_title'),
         onClick: async (input) => {
           try {
             const kp = await api('/api/keypair', { private_key: input.value.trim() });
@@ -315,7 +397,7 @@ function renderAwg() {
   g.innerHTML = '';
   AWG_NUMS.forEach((k) => field(g, { label: k, get: () => e[k], set: (v) => { e[k] = num(v); } }));
   AWG_HDRS.forEach((k) => field(g, {
-    label: k, hint: 'value or range', placeholder: '39602205-139602204',
+    label: k, hint: t('hint.range'), placeholder: '39602205-139602204',
     get: () => e[k], set: (v) => { e[k] = v.trim() === '' ? undefined : v.trim(); },
   }));
 
@@ -332,7 +414,8 @@ function renderClient() {
   const g = $('#client-grid');
   g.innerHTML = '';
   field(g, {
-    label: 'Endpoint host', hint: 'goes in the .conf', placeholder: 'vpn.example.com',
+    label: t('fields.endpoint_host'), hint: t('hint.goes_in_conf'),
+    placeholder: 'vpn.example.com',
     get: () => c.endpoint_host, set: (v) => { c.endpoint_host = v.trim(); },
   });
   field(g, { label: 'DNS', placeholder: '10.3.2.1', get: () => c.dns, set: (v) => { c.dns = v.trim(); } });
@@ -342,7 +425,8 @@ function renderClient() {
     get: () => c.persistent_keepalive, set: (v) => { c.persistent_keepalive = v.trim(); },
   });
   field(g, {
-    label: 'AllowedIPs', hint: 'client side', wide: true, placeholder: '0.0.0.0/0, ::/0',
+    label: 'AllowedIPs', hint: t('hint.client_side'), wide: true,
+    placeholder: '0.0.0.0/0, ::/0',
     get: () => c.allowed_ips, set: (v) => { c.allowed_ips = v; },
   });
 
@@ -360,8 +444,8 @@ function renderPeers() {
   const host = $('#peers');
   host.innerHTML = '';
   $('#peer-count').textContent = e.peers.length
-    ? `${e.peers.length} configured`
-    : 'none yet — hit Add client';
+    ? t('clients.count', { n: e.peers.length })
+    : t('clients.none');
 
   e.peers.forEach((p, i) => {
     const ready = !!vaultPeer(p.public_key || '').private_key && !!vEp().server_public_key;
@@ -371,13 +455,13 @@ function renderPeers() {
     const left = el('div', 'peer-left');
     left.appendChild(el('span', 'idx', '#' + (i + 1)));
     const name = el('input', 'name');
-    name.placeholder = 'name';
+    name.placeholder = t('common.name');
     name.value = vaultPeer(p.public_key || '').name || '';
     name.addEventListener('input', () => { vaultPeer(p.public_key || '').name = name.value; touch(); });
     left.appendChild(name);
     if (!ready) {
       left.appendChild(el('span', 'tag-warn',
-        vEp().server_public_key ? 'no private key — cannot build .conf' : 'server public key missing'));
+        t(vEp().server_public_key ? 'peer.no_privkey' : 'peer.no_serverkey')));
     }
     head.appendChild(left);
 
@@ -388,10 +472,11 @@ function renderPeers() {
       btns.appendChild(b);
       return b;
     };
-    mk('Copy .conf', 'primary', () => copyText(buildConf(i))).disabled = !ready;
-    mk('Download', 'ghost', () => download(peerLabel(p, i) + '.conf', buildConf(i))).disabled = !ready;
-    mk('View', 'ghost', () => showConf(i)).disabled = !ready;
-    mk('Rekey', 'ghost', async () => {
+    mk(t('peer.copy_conf'), 'primary', () => copyText(buildConf(i))).disabled = !ready;
+    mk(t('common.download'), 'ghost',
+       () => download(peerLabel(p, i) + '.conf', buildConf(i))).disabled = !ready;
+    mk(t('common.view'), 'ghost', () => showConf(i)).disabled = !ready;
+    mk(t('peer.rekey'), 'ghost', async () => {
       try {
         const kp = await api('/api/keypair', {});
         const peers = vEp().peers;
@@ -403,9 +488,9 @@ function renderPeers() {
         renderPeers(); touch();
       } catch (err) { toast(String(err.message || err), 'err'); }
     });
-    mk('Delete', 'danger ghost', () => {
-      const label = vaultPeer(p.public_key || '').name || ('peer #' + (i + 1));
-      if (!confirm('Remove ' + label + '?')) return;
+    mk(t('common.delete'), 'danger ghost', () => {
+      const label = vaultPeer(p.public_key || '').name || t('v.peer_label', { n: i + 1 });
+      if (!confirm(t('confirm.remove', { name: label }))) return;
       delete vEp().peers[p.public_key || ''];
       e.peers.splice(i, 1);
       renderPeers(); touch();
@@ -414,11 +499,17 @@ function renderPeers() {
     box.appendChild(head);
 
     const addr = el('div', 'peer-addr');
-    (p.allowed_ips || ['no address']).forEach((a) => addr.appendChild(el('span', null, a)));
+    const showAddr = () => {
+      addr.innerHTML = '';
+      const ips = asList(p.allowed_ips);
+      (ips.length ? ips : [t('peer.no_address')])
+        .forEach((a) => addr.appendChild(el('span', null, a)));
+    };
+    showAddr();
     box.appendChild(addr);
 
     const det = el('details');
-    det.appendChild(el('summary', null, 'keys & addresses'));
+    det.appendChild(el('summary', null, t('peer.details')));
     const g = el('div', 'grid');
     field(g, {
       label: 'public_key', wide: true,
@@ -432,8 +523,8 @@ function renderPeers() {
       },
     });
     field(g, {
-      label: 'private key', hint: 'sidecar only', wide: true,
-      placeholder: 'stored in awg-vault.json, needed for the .conf',
+      label: t('fields.private_key'), hint: t('hint.sidecar_only'), wide: true,
+      placeholder: t('hint.privkey_ph'),
       get: () => vaultPeer(p.public_key || '').private_key,
       set: (v) => { vaultPeer(p.public_key || '').private_key = v.trim(); },
     });
@@ -442,7 +533,7 @@ function renderPeers() {
       get: () => p.pre_shared_key,
       set: (v) => { if (v.trim()) p.pre_shared_key = v.trim(); else delete p.pre_shared_key; },
       buttons: [{
-        label: 'New', title: 'Fresh preshared key',
+        label: t('common.new'), title: t('hint.new_psk_title'),
         onClick: async (input) => {
           const r = await api('/api/psk', {});
           p.pre_shared_key = r.pre_shared_key;
@@ -451,17 +542,16 @@ function renderPeers() {
       }],
     });
     field(g, {
-      label: 'allowed_ips', hint: 'comma separated', wide: true,
+      label: 'allowed_ips', hint: t('hint.comma'), wide: true,
       placeholder: '10.3.2.2/32, fd42:3:2::2/128',
       get: () => listGet(p.allowed_ips), set: (v) => { p.allowed_ips = listSet(v); },
       buttons: [{
-        label: 'Next free', title: 'Assign the next unused address pair',
+        label: t('hint.next_free'), title: t('hint.next_free_title'),
         onClick: (input) => {
           const other = Object.assign({}, e, { peers: e.peers.filter((_, j) => j !== i) });
           p.allowed_ips = nextFreeAddresses(other);
           input.value = listGet(p.allowed_ips);
-          addr.innerHTML = '';
-          (p.allowed_ips || ['no address']).forEach((a) => addr.appendChild(el('span', null, a)));
+          showAddr();
         },
       }],
     });
@@ -523,83 +613,82 @@ function validate() {
   if (!e) return out;
   const v = vEp();
 
-  if (!e.tag) err('tag is empty');
-  if (endpoints().filter((x) => isWg(x) && x.tag === e.tag).length > 1) err(`duplicate tag "${e.tag}"`);
+  if (!e.tag) err(t('v.tag_empty'));
+  if (endpoints().filter((x) => isWg(x) && x.tag === e.tag).length > 1) {
+    err(t('v.tag_dup', { tag: e.tag }));
+  }
 
-  const addrs = Array.isArray(e.address) ? e.address : [];
-  if (!addrs.length) err('address is empty');
-  addrs.forEach((a) => { if (!parseCidr(a)) err(`address "${a}" is not a valid CIDR`); });
+  const addrs = asList(e.address);
+  if (!addrs.length) err(t('v.addr_empty'));
+  addrs.forEach((a) => { if (!parseCidr(a)) err(t('v.addr_bad', { addr: a })); });
 
-  if (!isKey(e.private_key)) err('private_key is not a 32-byte base64 key');
-  if (!v.server_public_key) warn('server public key unknown — click "Derive pub"; client .conf files need it');
+  if (!isKey(e.private_key)) err(t('v.privkey_bad'));
+  if (!v.server_public_key) warn(t('v.serverpub_unknown'));
 
   const port = Number(e.listen_port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) err('listen_port must be 1–65535');
-  if (e.mtu != null && (e.mtu < 576 || e.mtu > 1500)) warn(`mtu ${e.mtu} is unusual for wireguard`);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) err(t('v.port_range'));
+  if (e.mtu != null && (e.mtu < 576 || e.mtu > 1500)) warn(t('v.mtu_odd', { mtu: e.mtu }));
 
   const jc = Number(e.jc), jmin = Number(e.jmin), jmax = Number(e.jmax);
-  if (Number.isFinite(jmin) && Number.isFinite(jmax) && jmin >= jmax) err('jmin must be less than jmax');
-  if (Number.isFinite(jc) && jc > 128) warn('jc above 128 adds a lot of junk traffic');
-  if (Number.isFinite(jmax) && jmax > 1280) warn('jmax above 1280 can exceed the MTU');
+  if (Number.isFinite(jmin) && Number.isFinite(jmax) && jmin >= jmax) err(t('v.jminmax'));
+  if (Number.isFinite(jc) && jc > 128) warn(t('v.jc_high'));
+  if (Number.isFinite(jmax) && jmax > 1280) warn(t('v.jmax_high'));
   const s1 = Number(e.s1), s2 = Number(e.s2);
-  if (Number.isFinite(s1) && Number.isFinite(s2) && s1 + 56 === s2) {
-    err('s1 + 56 must not equal s2 — the handshake packets become distinguishable');
-  }
+  if (Number.isFinite(s1) && Number.isFinite(s2) && s1 + 56 === s2) err(t('v.s1s2'));
 
   const hdrs = AWG_HDRS.map((k) => ({ k, p: parseHeader(e[k]) }));
   hdrs.forEach(({ k, p }) => {
-    if (p === undefined) err(`${k} is neither a number nor an "a-b" range`);
-    else if (p === null) warn(`${k} is empty`);
+    if (p === undefined) err(t('v.h_bad', { k }));
+    else if (p === null) warn(t('v.h_empty', { k }));
     else {
-      if (p.lo <= 4) err(`${k} must be greater than 4`);
-      if (p.hi < p.lo) err(`${k} range is inverted`);
+      if (p.lo <= 4) err(t('v.h_low', { k }));
+      if (p.hi < p.lo) err(t('v.h_inverted', { k }));
     }
   });
   for (let i = 0; i < hdrs.length; i++) {
     for (let j = i + 1; j < hdrs.length; j++) {
       const a = hdrs[i].p, b = hdrs[j].p;
       if (a && b && a.lo <= b.hi && b.lo <= a.hi) {
-        err(`${hdrs[i].k} and ${hdrs[j].k} overlap — header values must be distinct`);
+        err(t('v.h_overlap', { a: hdrs[i].k, b: hdrs[j].k }));
       }
     }
   }
 
   ['i1', 'i2', 'i3', 'i4', 'i5'].forEach((k) => {
-    if (e[k] && !TEMPLATE.test(String(e[k]))) warn(`server ${k} does not look like a packet template`);
+    if (e[k] && !TEMPLATE.test(String(e[k]))) warn(t('v.i_server_bad', { k }));
     const cv = v.client[k];
-    if (cv && !TEMPLATE.test(String(cv))) warn(`client ${k.toUpperCase()} does not look like a packet template`);
+    if (cv && !TEMPLATE.test(String(cv))) warn(t('v.i_client_bad', { k: k.toUpperCase() }));
   });
   const anyServerI = ['i1', 'i2', 'i3', 'i4', 'i5'].some((k) => e[k]);
   const anyClientI = ['i1', 'i2', 'i3', 'i4', 'i5'].some((k) => v.client[k]);
-  if (anyServerI && !anyClientI) warn('server has i1–i5 but no client templates are set — .conf files will omit I1–I5');
+  if (anyServerI && !anyClientI) warn(t('v.i_client_missing'));
 
-  if (!v.client.endpoint_host) warn('client Endpoint host is unset — generated .conf files will have no Endpoint line');
+  if (!v.client.endpoint_host) warn(t('v.host_unset'));
 
   const seenKeys = new Map(), seenIps = new Map();
-  (e.peers || []).forEach((p, i) => {
-    const label = `peer #${i + 1}`;
-    if (!isKey(p.public_key)) err(`${label}: public_key is not a 32-byte base64 key`);
-    else if (seenKeys.has(p.public_key)) err(`${label}: public_key duplicates peer #${seenKeys.get(p.public_key) + 1}`);
-    else seenKeys.set(p.public_key, i);
+  (Array.isArray(e.peers) ? e.peers : []).forEach((p, i) => {
+    const peer = t('v.peer_label', { n: i + 1 });
+    if (!isKey(p.public_key)) err(t('v.peer_pubkey_bad', { peer }));
+    else if (seenKeys.has(p.public_key)) {
+      err(t('v.peer_pubkey_dup', { peer, n: seenKeys.get(p.public_key) + 1 }));
+    } else seenKeys.set(p.public_key, i);
 
-    if (p.pre_shared_key && !isKey(p.pre_shared_key)) err(`${label}: pre_shared_key is not a 32-byte base64 key`);
-    if (!p.pre_shared_key) warn(`${label}: no pre_shared_key`);
+    if (p.pre_shared_key && !isKey(p.pre_shared_key)) err(t('v.peer_psk_bad', { peer }));
+    if (!p.pre_shared_key) warn(t('v.peer_psk_missing', { peer }));
 
-    const ips = Array.isArray(p.allowed_ips) ? p.allowed_ips : [];
-    if (!ips.length) err(`${label}: allowed_ips is empty`);
+    const ips = asList(p.allowed_ips);
+    if (!ips.length) err(t('v.peer_ips_empty', { peer }));
     ips.forEach((a) => {
       const c = parseCidr(a);
-      if (!c) { err(`${label}: allowed_ips "${a}" is not a valid CIDR`); return; }
+      if (!c) { err(t('v.peer_ip_bad', { peer, addr: a })); return; }
       if ((c.v === 4 && c.prefix !== 32) || (c.v === 6 && c.prefix !== 128)) {
-        warn(`${label}: allowed_ips "${a}" is not a single host route`);
+        warn(t('v.peer_ip_nothost', { peer, addr: a }));
       }
-      if (seenIps.has(a)) err(`${label}: address ${a} already used by peer #${seenIps.get(a) + 1}`);
+      if (seenIps.has(a)) err(t('v.peer_ip_dup', { peer, addr: a, n: seenIps.get(a) + 1 }));
       else seenIps.set(a, i);
     });
 
-    if (!vaultPeer(p.public_key || '').private_key) {
-      warn(`${label}: no private key in the sidecar — cannot generate a .conf`);
-    }
+    if (!vaultPeer(p.public_key || '').private_key) warn(t('v.peer_no_privkey', { peer }));
   });
 
   return out;
@@ -611,14 +700,16 @@ function renderIssues() {
   const issues = validate();
   issues.forEach((i) => ul.appendChild(el('li', i.kind, i.m)));
 
+  $('#no-issues').classList.toggle('hidden', issues.length > 0);
+
   const errs = issues.filter((i) => i.kind === 'err').length;
   const warns = issues.length - errs;
   const badge = $('#issue-badge');
   badge.classList.toggle('hidden', !issues.length);
   badge.classList.toggle('bad', errs > 0);
-  badge.textContent = errs
-    ? `${errs} error${errs > 1 ? 's' : ''}${warns ? ` · ${warns} warning${warns > 1 ? 's' : ''}` : ''}`
-    : `${warns} warning${warns > 1 ? 's' : ''}`;
+  badge.textContent = !errs
+    ? t('badge.warnings', { n: warns })
+    : (warns ? t('badge.both', { e: errs, w: warns }) : t('badge.errors', { n: errs }));
 
   const e = ep();
   $('#summary-hint').textContent = e
@@ -645,7 +736,7 @@ function buildConf(i) {
 
   L.push('[Interface]');
   put('PrivateKey', vaultPeer(p.public_key || '').private_key);
-  put('Address', (p.allowed_ips || []).join(', '));
+  put('Address', asList(p.allowed_ips).join(', '));
   put('DNS', c.dns);
   put('MTU', c.mtu || e.mtu);
   put('Jc', e.jc);
@@ -703,7 +794,6 @@ function download(name, text, type) {
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    toast('Copied.', 'ok');
   } catch {
     const ta = el('textarea');
     ta.value = text;
@@ -711,8 +801,8 @@ async function copyText(text) {
     ta.select();
     document.execCommand('copy');
     ta.remove();
-    toast('Copied.', 'ok');
   }
+  toast(t('toast.copied'), 'ok');
 }
 
 function addEndpoint() {
@@ -754,7 +844,7 @@ async function addPeers(count) {
     for (let n = 0; n < count; n++) {
       const ips = nextFreeAddresses(e);
       if (!ips.length) {
-        toast(made ? `Subnet full after ${made} client(s).` : 'No free addresses left in the subnet.', 'err');
+        toast(made ? t('toast.subnet_full', { n: made }) : t('toast.no_free'), 'err');
         break;
       }
       const kp = await api('/api/keypair', {});
@@ -773,7 +863,7 @@ async function addPeers(count) {
   if (made) {
     renderPeers();
     touch();
-    toast(`Created ${made} client${made > 1 ? 's' : ''}. Save to write config.json.`, 'ok');
+    toast(t('toast.created', { n: made }), 'ok');
   }
 }
 
@@ -787,6 +877,7 @@ async function load() {
 
   $('#path-config').textContent = st.meta.config_path + (st.meta.config_exists ? '' : ' (new)');
   $('#path-vault').textContent = st.meta.vault_path + (st.meta.vault_exists ? '' : ' (new)');
+  renderLanguagePicker();
   $('#comment-note').classList.toggle('hidden', !st.meta.config_has_comments);
   $('#btn-restart').classList.toggle('hidden', !st.meta.restart_enabled);
   $('#btn-restart').title = st.meta.restart_cmd;
@@ -794,6 +885,7 @@ async function load() {
   if (st.meta.read_only) $('#btn-save').title = 'server started with --read-only';
   (st.meta.errors || []).forEach((m) => toast(m, 'err'));
 
+  normalizeConfig();
   await syncServerKeys();
   S.sel = endpoints().findIndex(isWg);
   render();
@@ -818,13 +910,14 @@ async function save() {
     S.dirty = false;
     refresh();
     const notes = [];
-    if (r.config_backup) notes.push('backup: ' + r.config_backup);
+    if (r.config_backup) notes.push(t('toast.backup', { path: r.config_backup }));
     if (S.meta.config_has_comments && !r.comments_preserved) {
-      notes.push('config.json was rewritten in full — comments were not kept');
+      notes.push(t('toast.comments_lost'));
     }
-    toast('Saved ' + r.saved_at + (notes.length ? '\n' + notes.join('\n') : ''), 'ok');
+    toast(t('toast.saved', { when: r.saved_at }) +
+          (notes.length ? '\n' + notes.join('\n') : ''), 'ok');
   } catch (err) {
-    toast('Save failed — ' + (err.message || err), 'err');
+    toast(t('toast.save_failed', { err: err.message || err }), 'err');
   }
 }
 
@@ -836,20 +929,23 @@ document.addEventListener('click', (ev) => {
 });
 
 $('#btn-reload').addEventListener('click', async () => {
-  if (S.dirty && !confirm('Discard unsaved changes and reload from disk?')) return;
+  if (S.dirty && !confirm(t('confirm.discard'))) return;
   await load();
-  toast('Reloaded from disk.', 'ok');
+  toast(t('toast.reloaded'), 'ok');
 });
 $('#btn-save').addEventListener('click', save);
 $('#btn-restart').addEventListener('click', async () => {
-  if (!confirm('Restart sing-box now?')) return;
+  if (!confirm(t('confirm.restart'))) return;
   try {
     const r = await api('/api/restart', {});
-    toast(r.ok ? 'sing-box restarted.' : 'Restart failed:\n' + (r.stderr || r.stdout), r.ok ? 'ok' : 'err');
+    toast(r.ok ? t('toast.restarted')
+               : t('toast.restart_failed') + '\n' + (r.stderr || r.stdout),
+          r.ok ? 'ok' : 'err');
   } catch (err) {
     toast(String(err.message || err), 'err');
   }
 });
+$('#lang').addEventListener('change', (ev) => setLanguage(ev.target.value, true));
 $('#btn-add-peer').addEventListener('click', () => {
   const n = Math.max(1, Math.min(50, parseInt($('#add-count').value, 10) || 1));
   addPeers(n);
@@ -863,7 +959,7 @@ $('#btn-bundle').addEventListener('click', async () => {
   const files = (e.peers || [])
     .map((p, i) => ({ name: peerLabel(p, i) + '.conf', content: buildConf(i) }))
     .filter((f) => f.content.includes('PrivateKey ='));
-  if (!files.length) { toast('No peers with a stored private key.', 'err'); return; }
+  if (!files.length) { toast(t('toast.no_conf_peers'), 'err'); return; }
   const seen = new Set();
   files.forEach((f) => {
     let n = f.name, k = 2;
@@ -902,4 +998,28 @@ window.addEventListener('beforeunload', (ev) => {
   if (S.dirty) { ev.preventDefault(); ev.returnValue = ''; }
 });
 
-load().catch((err) => toast('Could not load state — ' + (err.message || err), 'err'));
+/**
+ * English is loaded first and kept as the fallback, so a locale that is missing
+ * a key still shows something. Then: an explicit choice in this browser beats
+ * the server's configured default, which beats the browser's own preference.
+ */
+async function boot() {
+  S.fallback = await fetchLocale('en').catch(() => ({}));
+  S.strings = S.fallback;
+
+  const st = await api('/api/state');       // fetched again by load(); cheap and keeps load() simple
+  const available = (st.meta.languages || []).map((l) => l.code);
+  const browser = (navigator.languages || [navigator.language || ''])
+    .map((l) => String(l).split('-')[0].toLowerCase())
+    .find((l) => available.includes(l));
+
+  const chosen = localStorage.getItem(LANG_KEY) || st.meta.language || browser || 'en';
+  await setLanguage(available.includes(chosen) ? chosen : 'en', false);
+
+  await load();
+}
+
+boot().catch((err) => {
+  applyStaticText();
+  toast(t('toast.load_failed', { err: err.message || err }), 'err');
+});

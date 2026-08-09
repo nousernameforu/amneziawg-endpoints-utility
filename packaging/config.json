@@ -43,6 +43,12 @@
 
   // --- behaviour ------------------------------------------------------------
 
+  // Default UI language, by the filename in static/i18n (en, ru, ...). Each
+  // browser can override this with the picker in the header; that choice is
+  // remembered locally and does not change this setting. Adding a language is
+  // just dropping another JSON file into static/i18n.
+  "language": "en",
+
   // Timestamped copies of config.json kept beside it on every save.
   "keep_backups": 10,
 
