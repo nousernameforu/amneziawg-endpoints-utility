@@ -1,0 +1,45 @@
+[Unit]
+Description=AmneziaWG client config editor for sing-box
+Documentation=file://__PREFIX__/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+# Everything else is configured in the file below, not here. Edit it and
+# `systemctl restart awg-endpoints` — no need to touch this unit.
+ExecStart=/usr/bin/env python3 __PREFIX__/server.py --config __CONFIGFILE__
+Restart=on-failure
+RestartSec=3
+
+# --- sandbox -----------------------------------------------------------------
+# NoNewPrivileges must be off when the restart hook is enabled, because sudo is
+# setuid and cannot work without it. That is the price of the Restart button.
+NoNewPrivileges=__NNP__
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=__RW_PATHS__
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=__RESTRICT_SUID__
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=__CAPS__
+AmbientCapabilities=__CAPS__
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -787,6 +787,7 @@ async function load() {
 
   $('#path-config').textContent = st.meta.config_path + (st.meta.config_exists ? '' : ' (new)');
   $('#path-vault').textContent = st.meta.vault_path + (st.meta.vault_exists ? '' : ' (new)');
+  $('#comment-note').classList.toggle('hidden', !st.meta.config_has_comments);
   $('#btn-restart').classList.toggle('hidden', !st.meta.restart_enabled);
   $('#btn-restart').title = st.meta.restart_cmd;
   $('#btn-save').disabled = st.meta.read_only;
@@ -816,7 +817,12 @@ async function save() {
     const r = await api('/api/save', { config: S.config, vault: S.vault });
     S.dirty = false;
     refresh();
-    toast('Saved ' + r.saved_at + (r.config_backup ? '\nbackup: ' + r.config_backup : ''), 'ok');
+    const notes = [];
+    if (r.config_backup) notes.push('backup: ' + r.config_backup);
+    if (S.meta.config_has_comments && !r.comments_preserved) {
+      notes.push('config.json was rewritten in full — comments were not kept');
+    }
+    toast('Saved ' + r.saved_at + (notes.length ? '\n' + notes.join('\n') : ''), 'ok');
   } catch (err) {
     toast('Save failed — ' + (err.message || err), 'err');
   }

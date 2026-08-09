@@ -1,0 +1,68 @@
+// Configuration for awg-endpoints. Installed to /etc/awg-endpoints/config.json.
+//
+// Comments and trailing commas are fine here — same parser the app uses for
+// sing-box's own config. Apply changes with:
+//
+//     sudo systemctl restart awg-endpoints
+//
+// Command line flags override anything set here; unknown keys are an error
+// rather than being silently ignored, so a typo fails loudly at startup.
+{
+  // --- what to edit ---------------------------------------------------------
+
+  "sing_box_config": "/etc/sing-box/config.json",
+
+  // Peer private keys, the server public key and client defaults. This app owns
+  // this file; sing-box never reads it. Keep it 0600 and back it up.
+  //
+  // Do NOT put this inside /etc/sing-box. sing-box is often started with
+  // `-C /etc/sing-box`, which loads every *.json in that directory — it would
+  // try to parse the vault as configuration and refuse to start.
+  "vault": "/var/lib/awg-endpoints/vault.json",
+
+  // --- where to listen ------------------------------------------------------
+
+  // Keep this on loopback and let sing-box route tunnel traffic to it. Binding
+  // anything else without auth is refused outright.
+  "host": "127.0.0.1",
+  "port": 8787,
+
+  // --- who may use it -------------------------------------------------------
+
+  "auth": {
+    "user": "admin",
+
+    // Either a pbkdf2 string from `server.py --hash-password`, or a literal
+    // password. Use the hash: this file is readable by the service user.
+    "password": "",
+
+    // Alternative to the above: read "user:password" from another file. Handy
+    // if you want the credentials somewhere this config is not.
+    "password_file": ""
+  },
+
+  // --- behaviour ------------------------------------------------------------
+
+  // Timestamped copies of config.json kept beside it on every save.
+  "keep_backups": 10,
+
+  // Serve the editor but refuse to write anything. Useful for a look around.
+  "read_only": false,
+
+  // Enables the Restart button. Empty disables it. The installer sets this to
+  // a sudo command scoped to exactly one unit when run with --with-restart.
+  "restart_cmd": "",
+
+  // --- HTTPS (optional) -----------------------------------------------------
+
+  // Basic auth sends the password on every request, so it is only as private as
+  // the transport. Inside the tunnel that is fine; on anything else, set these.
+  "tls": {
+    "cert": "",
+    "key": ""
+  },
+
+  // Allow binding a non-loopback address with no authentication configured.
+  // Only if the port is already restricted by other means.
+  "allow_insecure": false
+}

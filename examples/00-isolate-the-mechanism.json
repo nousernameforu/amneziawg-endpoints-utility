@@ -1,0 +1,45 @@
+// Standalone throwaway config. Proves the destination-override works in YOUR
+// sing-box build, with no tunnel, no client and no DNS involved.
+//
+//   1. start the app:   python3 server.py --host 127.0.0.1 --port 8787 --auth admin:test
+//   2. check it parses: sing-box check -c examples/00-isolate-the-mechanism.json
+//   3. run it:          sing-box run -c examples/00-isolate-the-mechanism.json
+//   4. from the server, pretend to be a proxy client:
+//
+//        curl -si -x http://127.0.0.1:2080 -u admin:test http://awg-admin.internal/api/state | head -1
+//
+// Expect "HTTP/1.1 200 OK". You never resolved awg-admin.internal anywhere —
+// the proxy carried the hostname and the rule rewrote the destination.
+//
+// If step 2 fails complaining about override_address / action, your build is
+// older than 1.11: use 02-route-additions-legacy.json instead.
+{
+  "log": { "level": "debug" },
+
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "test-in",
+      "listen": "127.0.0.1",
+      "listen_port": 2080
+    }
+  ],
+
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ],
+
+  "route": {
+    "rules": [
+      {
+        "inbound": ["test-in"],
+        "domain": ["awg-admin.internal"],
+        "action": "route",
+        "outbound": "direct",
+        "override_address": "127.0.0.1",
+        "override_port": 8787
+      }
+    ],
+    "final": "direct"
+  }
+}

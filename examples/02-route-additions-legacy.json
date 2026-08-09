@@ -1,0 +1,41 @@
+// Same thing for pre-1.11 bases, where rule actions do not exist yet.
+//
+// The overrides live on a dedicated direct OUTBOUND, and the rules just point
+// at its tag. Everything else — hostname for proxies, IP+port for tunnels — is
+// identical.
+{
+  "outbounds": [
+    { "type": "direct", "tag": "direct" },
+
+    // Same as `direct`, except every connection routed here is redirected to
+    // the admin app regardless of where it was originally headed.
+    {
+      "type": "direct",
+      "tag": "awg-admin-app",
+      "override_address": "127.0.0.1",
+      "override_port": 8787
+    }
+
+    // ... your existing outbounds follow ...
+  ],
+
+  "route": {
+    "rules": [
+      {
+        "inbound": ["hy2-in"],
+        "domain": ["awg-admin.internal"],
+        "outbound": "awg-admin-app"
+      },
+      {
+        "network": ["tcp"],
+        "source_ip_cidr": ["10.3.2.2/32"],
+        "ip_cidr": ["10.3.2.1/32"],
+        "port": [80],
+        "outbound": "awg-admin-app"
+      }
+
+      // ... your existing rules follow ...
+    ],
+    "final": "direct"
+  }
+}

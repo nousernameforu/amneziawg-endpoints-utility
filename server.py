@@ -15,15 +15,20 @@ Stdlib only. Bind to localhost unless you know what you are doing.
 
 import argparse
 import base64
+import getpass
+import hashlib
+import hmac
 import io
 import json
 import os
 import posixpath
-import re
 import shlex
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -154,14 +159,221 @@ def canonicalize(config):
     return config
 
 
+# --------------------------------------------------------------------------
+# JSONC — sing-box accepts comments, so we must too, and must not eat them.
+# --------------------------------------------------------------------------
+
+def strip_jsonc(text):
+    """Blank out // and /* */ comments and trailing commas by overwriting them
+    with spaces. The result is the same length as the input, so offsets found in
+    it point at the same characters in the original — which is what lets us
+    splice the endpoints array back without disturbing anything else. Newlines
+    survive so parse errors keep their line numbers.
+
+    Returns (clean, had_comments)."""
+    out = []
+    had_comments = False
+    i, n = 0, len(text)
+    in_str = esc = False
+
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "#" or (c == "/" and i + 1 < n and text[i + 1] == "/"):
+            # '#' is not JSONC, but it is never valid JSON outside a string
+            # either, so accepting it costs nothing and people type it.
+            had_comments = True
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if c == "/" and i + 1 < n:
+            if text[i + 1] == "*":
+                had_comments = True
+                j = text.find("*/", i + 2)
+                if j < 0:
+                    raise ValueError("unterminated /* comment")
+                end = j + 2
+                out.append("".join("\n" if ch == "\n" else " " for ch in text[i:end]))
+                i = end
+                continue
+        out.append(c)
+        i += 1
+
+    return _drop_trailing_commas("".join(out)), had_comments
+
+
+def _drop_trailing_commas(text):
+    out = []
+    i, n = 0, len(text)
+    in_str = esc = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+        elif c == ",":
+            j = i + 1
+            while j < n and text[j].isspace():
+                j += 1
+            if j < n and text[j] in "}]":
+                out.append(" ")             # blank it, preserving length
+                i += 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def parse_jsonc(text):
+    clean, had_comments = strip_jsonc(text)
+    return json.loads(clean), had_comments
+
+
+def _skip_string(text, i):
+    """text[i] is the opening quote; returns the index after the closing one."""
+    i += 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            return i + 1
+        i += 1
+    raise ValueError("unterminated string")
+
+
+def _span_of_value(text, i):
+    """text[i] opens a { or [; returns the index just past its match."""
+    opener = text[i]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            i = _skip_string(text, i)
+            continue
+        if c == opener:
+            depth += 1
+        elif c == closer:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    raise ValueError("unbalanced %s" % opener)
+
+
+def find_top_level_key(text, key):
+    """Locate a key in the outermost object. Returns (value_start, value_end,
+    line_indent) or None. Comments must already be stripped."""
+    i, n = 0, len(text)
+    depth = 0
+    while i < n:
+        c = text[i]
+        if c == '"':
+            start = i
+            end = _skip_string(text, i)
+            if depth == 1:
+                name = json.loads(text[start:end])
+                j = end
+                while j < n and text[j].isspace():
+                    j += 1
+                if j < n and text[j] == ":" and name == key:
+                    j += 1
+                    while j < n and text[j].isspace():
+                        j += 1
+                    if j < n and text[j] in "[{":
+                        line_start = text.rfind("\n", 0, start) + 1
+                        indent = len(text[line_start:start]) - len(text[line_start:start].lstrip())
+                        return start, _span_of_value(text, j), indent
+            i = end
+            continue
+        if c in "{[":
+            depth += 1
+        elif c in "}]":
+            depth -= 1
+        i += 1
+    return None
+
+
+def splice_endpoints(original, config):
+    """Rewrite only the endpoints array inside the original text, so comments
+    everywhere else survive. Returns None when it cannot be done safely."""
+    clean, _ = strip_jsonc(original)
+    found = find_top_level_key(clean, "endpoints")
+    if not found:
+        return None
+    key_start, value_end, indent = found
+
+    # The stripped text is the same length as the original, so offsets carry over.
+    colon = original.find(":", key_start)
+    if colon < 0:
+        return None
+    value_start = colon + 1
+    while value_start < len(original) and original[value_start].isspace():
+        value_start += 1
+
+    pad = " " * indent
+    body = json.dumps(config.get("endpoints", []), indent=2, ensure_ascii=False)
+    body = ("\n" + pad).join(body.split("\n"))
+    return original[:value_start] + body + original[value_end:]
+
+
 def read_json(path, default):
     if not os.path.exists(path):
-        return default, False
+        return default, False, False
     with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh), True
+        data, had_comments = parse_jsonc(fh.read())
+    return data, True, had_comments
 
 
-def write_json(path, data, keep_backups, mode=None):
+def write_config(path, config, keep_backups):
+    """Write config.json, keeping comments outside the endpoints array intact.
+
+    Falls back to a plain re-serialisation when the file has no endpoints key,
+    or when the spliced text does not parse back to exactly what we intended.
+    Returns (backup_path, comments_preserved).
+    """
+    text = None
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            original = fh.read()
+        try:
+            candidate = splice_endpoints(original, config)
+            if candidate is not None and parse_jsonc(candidate)[0] == config:
+                text = candidate
+        except Exception:                              # noqa: BLE001
+            text = None                                # fall through to rewrite
+    if text is None:
+        return write_json(path, config, keep_backups), False
+    return write_json(path, config, keep_backups, text=text), True
+
+
+def write_json(path, data, keep_backups, mode=None, text=None):
     """Timestamped backup, then atomic replace. Returns backup path or None."""
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
@@ -180,7 +392,8 @@ def write_json(path, data, keep_backups, mode=None):
         if mode is None:
             mode = os.stat(path).st_mode & 0o7777
 
-    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if text is None:
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".awgtmp-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -214,6 +427,91 @@ def _prune_backups(path, keep):
 
 
 EMPTY_VAULT = {"version": 1, "endpoints": {}}
+
+
+# --------------------------------------------------------------------------
+# Basic auth
+# --------------------------------------------------------------------------
+
+PBKDF2_ITERS = 240_000
+REALM = "awg-endpoints"
+
+
+def hash_password(password):
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERS)
+    return "pbkdf2_sha256$%d$%s$%s" % (PBKDF2_ITERS, _b64(salt), _b64(dk))
+
+
+def verify_password(password, stored):
+    """Constant-time check against either a pbkdf2 string or a literal password."""
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iters, salt_b64, hash_b64 = stored.split("$", 3)
+            dk = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"),
+                base64.b64decode(salt_b64), int(iters),
+            )
+        except Exception:                              # noqa: BLE001
+            return False
+        return hmac.compare_digest(_b64(dk), hash_b64)
+    return hmac.compare_digest(password, stored)
+
+
+def load_credentials(opts):
+    """Returns (user, secret) or None.
+
+    Precedence: --auth, then a password_file, then AWG_AUTH in the environment,
+    then auth.user/auth.password from the config file.
+    """
+    raw = None
+    if opts.auth:
+        raw = opts.auth
+    elif opts.auth_file:
+        with open(opts.auth_file, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    raw = line
+                    break
+        if raw is None:
+            raise SystemExit("no credentials found in %s" % opts.auth_file)
+    elif os.environ.get("AWG_AUTH"):
+        raw = os.environ["AWG_AUTH"]
+    elif opts.file_auth_user or opts.file_auth_password:
+        if not (opts.file_auth_user and opts.file_auth_password):
+            raise SystemExit(
+                "%s: auth.user and auth.password must both be set" % opts.settings_path)
+        return opts.file_auth_user, opts.file_auth_password
+
+    if raw is None:
+        return None
+    user, sep, secret = raw.partition(":")
+    if not sep or not user or not secret:
+        raise SystemExit("credentials must look like 'user:password'")
+    return user, secret
+
+
+class Throttle:
+    """Crude per-IP delay so a wrong password is not free to retry."""
+
+    def __init__(self):
+        self._fails = {}
+        self._lock = threading.Lock()
+
+    def penalty(self, ip):
+        with self._lock:
+            count, _ = self._fails.get(ip, (0, 0.0))
+        return min(count, 8) * 0.25
+
+    def record_failure(self, ip):
+        with self._lock:
+            count, _ = self._fails.get(ip, (0, 0.0))
+            self._fails[ip] = (count + 1, time.time())
+
+    def reset(self, ip):
+        with self._lock:
+            self._fails.pop(ip, None)
 
 
 # --------------------------------------------------------------------------
@@ -259,6 +557,47 @@ class Handler(BaseHTTPRequestHandler):
     def _fail(self, code, msg):
         self._json(code, {"error": msg})
 
+    # -- auth -------------------------------------------------------------
+
+    def _client_ip(self):
+        return self.client_address[0] if self.client_address else "?"
+
+    def _authorized(self):
+        creds = self.server.creds
+        if creds is None:
+            return True
+        user, secret = creds
+        header = self.headers.get("Authorization") or ""
+        if not header.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
+        except Exception:                              # noqa: BLE001
+            return False
+        got_user, sep, got_pass = decoded.partition(":")
+        if not sep:
+            return False
+        # Evaluate both halves so timing does not reveal which one was wrong.
+        user_ok = hmac.compare_digest(got_user, user)
+        pass_ok = verify_password(got_pass, secret)
+        return user_ok and pass_ok
+
+    def _require_auth(self):
+        """True when the request may proceed; otherwise sends 401."""
+        ip = self._client_ip()
+        delay = self.server.throttle.penalty(ip)
+        if delay:
+            time.sleep(delay)
+        if self._authorized():
+            self.server.throttle.reset(ip)
+            return True
+        self.server.throttle.record_failure(ip)
+        self.log_message("auth failure from %s", ip)
+        self._send(401, json.dumps({"error": "authentication required"}),
+                   "application/json",
+                   {"WWW-Authenticate": 'Basic realm="%s", charset="UTF-8"' % REALM})
+        return False
+
     def _body(self):
         """Always consumes the whole body — leaving bytes in the stream would
         desync the next request on a keep-alive connection."""
@@ -276,6 +615,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if not self._require_auth():
+            return
         try:
             if path == "/api/state":
                 return self.api_state()
@@ -291,10 +632,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
-            body = self._body()       # drained before anything can go wrong
+            body = self._body()       # drained first, or a 401 desyncs keep-alive
         except Exception as exc:                      # noqa: BLE001
             self.close_connection = True
             return self._fail(400, "bad request body: %s" % exc)
+        if not self._require_auth():
+            return
         try:
             if path == "/api/save":
                 return self.api_save(body)
@@ -332,14 +675,14 @@ class Handler(BaseHTTPRequestHandler):
         opts = self.server.opts
         errors = []
         try:
-            config, cfg_exists = read_json(opts.config, {"endpoints": []})
-        except json.JSONDecodeError as exc:
-            return self._fail(500, "config.json is not valid JSON: %s" % exc)
+            config, cfg_exists, cfg_comments = read_json(opts.config, {"endpoints": []})
+        except (json.JSONDecodeError, ValueError) as exc:
+            return self._fail(500, "config.json does not parse: %s" % exc)
         try:
-            vault, vault_exists = read_json(opts.vault, json.loads(json.dumps(EMPTY_VAULT)))
-        except json.JSONDecodeError as exc:
+            vault, vault_exists, _ = read_json(opts.vault, json.loads(json.dumps(EMPTY_VAULT)))
+        except (json.JSONDecodeError, ValueError) as exc:
             vault, vault_exists = json.loads(json.dumps(EMPTY_VAULT)), True
-            errors.append("vault is not valid JSON, starting empty: %s" % exc)
+            errors.append("vault does not parse, starting empty: %s" % exc)
 
         if not isinstance(config.get("endpoints"), list):
             config["endpoints"] = []
@@ -354,6 +697,7 @@ class Handler(BaseHTTPRequestHandler):
                 "vault_path": os.path.abspath(opts.vault),
                 "config_exists": cfg_exists,
                 "vault_exists": vault_exists,
+                "config_has_comments": cfg_comments,
                 "read_only": opts.read_only,
                 "restart_enabled": bool(opts.restart_cmd),
                 "restart_cmd": opts.restart_cmd or "",
@@ -374,12 +718,14 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(vault, dict):
             vault = json.loads(json.dumps(EMPTY_VAULT))
 
-        cfg_backup = write_json(opts.config, canonicalize(config), opts.keep_backups)
+        cfg_backup, comments_kept = write_config(
+            opts.config, canonicalize(config), opts.keep_backups)
         vault_backup = write_json(opts.vault, vault, opts.keep_backups, mode=0o600)
         self._json(200, {
             "ok": True,
             "config_backup": cfg_backup,
             "vault_backup": vault_backup,
+            "comments_preserved": comments_kept,
             "saved_at": datetime.now().isoformat(timespec="seconds"),
         })
 
@@ -430,39 +776,212 @@ class Handler(BaseHTTPRequestHandler):
         })
 
 
-def main(argv=None):
+DEFAULT_CONFIG_FILE = "/etc/awg-endpoints/config.json"
+
+VAULT_LOCATION_WARNING = """
+  WARNING: the vault sits in %s, the same directory as the sing-box
+           config. If sing-box is started with -C on that directory it loads
+           every *.json in it, will try to parse the vault as configuration,
+           and will fail to start. Move the vault somewhere else, e.g.
+           /var/lib/awg-endpoints/vault.json."""
+
+SETTING_DEFAULTS = {
+    "sing_box_config": "/etc/sing-box/config.json",
+    # Deliberately NOT inside /etc/sing-box: sing-box is often started with
+    # -C /etc/sing-box, which merges every *.json file in that directory. A
+    # vault sitting there gets parsed as config and kills the daemon on boot.
+    "vault": "/var/lib/awg-endpoints/vault.json",
+    "host": "127.0.0.1",
+    "port": 8787,
+    "keep_backups": 10,
+    "read_only": False,
+    "restart_cmd": "",
+    "allow_insecure": False,
+    "auth": {"user": "", "password": "", "password_file": ""},
+    "tls": {"cert": "", "key": ""},
+}
+
+
+def load_settings(path, required):
+    """Read the app's own config file. Returns {} when it is absent and was not
+    asked for explicitly."""
+    if not os.path.exists(path):
+        if required:
+            raise SystemExit("config file not found: %s" % path)
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data, _ = parse_jsonc(fh.read())
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit("%s does not parse: %s" % (path, exc))
+    if not isinstance(data, dict):
+        raise SystemExit("%s must contain a JSON object" % path)
+
+    # Typos in a config file that are silently ignored are a bad afternoon.
+    unknown = [k for k in data if k not in SETTING_DEFAULTS]
+    if unknown:
+        raise SystemExit("%s: unknown setting(s) %s\nvalid settings: %s" % (
+            path, ", ".join(sorted(unknown)), ", ".join(sorted(SETTING_DEFAULTS))))
+    for section in ("auth", "tls"):
+        if section in data:
+            if not isinstance(data[section], dict):
+                raise SystemExit("%s: '%s' must be an object" % (path, section))
+            bad = [k for k in data[section] if k not in SETTING_DEFAULTS[section]]
+            if bad:
+                raise SystemExit("%s: unknown %s setting(s) %s" % (
+                    path, section, ", ".join(sorted(bad))))
+    return data
+
+
+def build_options(argv):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", default="/etc/sing-box/config.json",
-                    help="path to the sing-box config (default: %(default)s)")
-    ap.add_argument("--vault", default="/etc/sing-box/awg-vault.json",
-                    help="path to the key sidecar (default: %(default)s)")
-    ap.add_argument("--host", default="127.0.0.1",
-                    help="bind address (default: %(default)s)")
-    ap.add_argument("--port", type=int, default=8787,
-                    help="bind port (default: %(default)s)")
-    ap.add_argument("--keep-backups", type=int, default=10,
-                    help="how many timestamped backups to retain (default: %(default)s)")
-    ap.add_argument("--read-only", action="store_true",
+    ap.add_argument("-c", "--config", default=None, metavar="PATH",
+                    help="this app's config file (default: %s)" % DEFAULT_CONFIG_FILE)
+    ap.add_argument("--sing-box-config", dest="sing_box_config", default=None,
+                    help="path to the sing-box config")
+    ap.add_argument("--vault", default=None, help="path to the key sidecar")
+    ap.add_argument("--host", default=None, help="bind address")
+    ap.add_argument("--port", type=int, default=None, help="bind port")
+    ap.add_argument("--keep-backups", type=int, default=None,
+                    help="how many timestamped backups to retain")
+    ap.add_argument("--read-only", action="store_true", default=None,
                     help="serve the editor but refuse to write anything")
-    ap.add_argument("--restart-cmd", default="",
+    ap.add_argument("--restart-cmd", default=None,
                     help="enable the Restart button, e.g. 'systemctl restart sing-box'")
-    opts = ap.parse_args(argv)
+    ap.add_argument("--auth", default=None,
+                    help="HTTP basic auth as 'user:password'; the password may be a "
+                         "pbkdf2 string from --hash-password")
+    ap.add_argument("--auth-file", default=None,
+                    help="read 'user:password' from the first non-comment line of a file")
+    ap.add_argument("--hash-password", action="store_true",
+                    help="prompt for a password, print a pbkdf2 string, exit")
+    ap.add_argument("--check", action="store_true",
+                    help="validate the config file and exit")
+    ap.add_argument("--tls-cert", default=None, help="PEM certificate, enables HTTPS")
+    ap.add_argument("--tls-key", default=None, help="PEM private key for --tls-cert")
+    ap.add_argument("--allow-insecure", action="store_true", default=None,
+                    help="permit binding a non-loopback address without auth")
+    args = ap.parse_args(argv)
+
+    if args.hash_password:
+        return args, None
+
+    settings = load_settings(args.config or DEFAULT_CONFIG_FILE, args.config is not None)
+    file_auth = settings.get("auth", {})
+    file_tls = settings.get("tls", {})
+
+    def pick(name, cli_value, section=None):
+        """Command line beats the config file beats the built-in default."""
+        if cli_value is not None:
+            return cli_value
+        if section:
+            return section.get(name, SETTING_DEFAULTS[
+                "auth" if section is file_auth else "tls"][name])
+        return settings.get(name, SETTING_DEFAULTS[name])
+
+    opts = argparse.Namespace(
+        settings_path=args.config or DEFAULT_CONFIG_FILE,
+        config=pick("sing_box_config", args.sing_box_config),
+        vault=pick("vault", args.vault),
+        host=pick("host", args.host),
+        port=int(pick("port", args.port)),
+        keep_backups=int(pick("keep_backups", args.keep_backups)),
+        read_only=bool(pick("read_only", args.read_only)),
+        restart_cmd=pick("restart_cmd", args.restart_cmd),
+        allow_insecure=bool(pick("allow_insecure", args.allow_insecure)),
+        tls_cert=pick("cert", args.tls_cert, file_tls),
+        tls_key=pick("key", args.tls_key, file_tls),
+        auth=args.auth,
+        auth_file=pick("password_file", args.auth_file, file_auth),
+        file_auth_user=file_auth.get("user", ""),
+        file_auth_password=file_auth.get("password", ""),
+        hash_password=False,
+    )
+    return args, opts
+
+
+def main(argv=None):
+    args, opts = build_options(argv)
+
+    if args.hash_password:
+        if sys.stdin.isatty():
+            pw = getpass.getpass("password: ")
+            if pw != getpass.getpass("again: "):
+                sys.exit("passwords do not match")
+        else:
+            pw = sys.stdin.readline().rstrip("\n")    # scriptable: echo pw | ...
+        if not pw:
+            sys.exit("empty password")
+        print(hash_password(pw))
+        return
 
     if not os.path.isdir(STATIC_DIR):
         sys.exit("missing static/ directory next to server.py")
+    if bool(opts.tls_cert) != bool(opts.tls_key):
+        sys.exit("tls.cert and tls.key must be given together")
+
+    creds = load_credentials(opts)
+
+    # sing-box is commonly run as `sing-box run -C /etc/sing-box`, which loads
+    # every *.json in that directory. A vault living there would be parsed as
+    # config and take the daemon down on its next restart.
+    vault_warning = os.path.dirname(os.path.abspath(opts.vault)) == \
+        os.path.dirname(os.path.abspath(opts.config))
+
+    if args.check:
+        print("%s: ok" % opts.settings_path)
+        print("  listen : %s:%d" % (opts.host, opts.port))
+        print("  config : %s" % opts.config)
+        print("  vault  : %s" % opts.vault)
+        print("  auth   : %s" % ("user '%s'" % creds[0] if creds else "NONE"))
+        print("  restart: %s" % (opts.restart_cmd or "disabled"))
+        for label, path in (("sing_box_config", opts.config), ("vault", opts.vault)):
+            if not os.path.exists(path):
+                print("  note   : %s does not exist yet (%s)" % (label, path))
+        if vault_warning:
+            print(VAULT_LOCATION_WARNING % os.path.dirname(os.path.abspath(opts.vault)))
+        return
+    loopback = opts.host in ("127.0.0.1", "::1", "localhost")
+    if not loopback and creds is None and not opts.allow_insecure:
+        sys.exit(
+            "refusing to bind %s without authentication.\n"
+            "Every private key in the vault would be readable by anything that can\n"
+            "reach the port. Set auth.user and auth.password in %s, or pass\n"
+            "--allow-insecure if the port is already restricted by other means."
+            % (opts.host, opts.settings_path)
+        )
 
     httpd = ThreadingHTTPServer((opts.host, opts.port), Handler)
     httpd.opts = opts
-    print("awg-endpoints on http://%s:%d" % (opts.host, opts.port))
+    httpd.creds = creds
+    httpd.throttle = Throttle()
+
+    scheme = "http"
+    if opts.tls_cert:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(opts.tls_cert, opts.tls_key)
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        scheme = "https"
+
+    print("awg-endpoints on %s://%s:%d" % (scheme, opts.host, opts.port))
+    print("  settings: %s%s" % (
+        opts.settings_path,
+        "" if os.path.exists(opts.settings_path) else " (absent, using defaults)"))
     print("  config : %s" % os.path.abspath(opts.config))
     print("  vault  : %s" % os.path.abspath(opts.vault))
+    print("  auth   : %s" % ("basic, user '%s'" % creds[0] if creds else "NONE"))
     if opts.read_only:
         print("  mode   : READ-ONLY")
     if opts.restart_cmd:
         print("  restart: %s" % opts.restart_cmd)
-    if opts.host not in ("127.0.0.1", "::1", "localhost"):
-        print("  WARNING: bound to a non-loopback address; this app has no auth.")
+    if not loopback and scheme == "http" and creds:
+        print("  WARNING: basic auth over plain HTTP sends the password in every")
+        print("           request. Fine inside the tunnel, not on an open network.")
+    if creds is None:
+        print("  WARNING: no authentication; keep this on loopback.")
+    if vault_warning:
+        print(VAULT_LOCATION_WARNING % os.path.dirname(os.path.abspath(opts.vault)))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

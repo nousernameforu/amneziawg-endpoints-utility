@@ -1,0 +1,73 @@
+// Additions for sing-box 1.11+ (rule actions).
+//
+// Merge these into your real config: the two rules go at the TOP of
+// route.rules, before anything that could match first. Change hy2-in to your
+// actual hysteria2 inbound tag, and 10.3.2.x to your subnet.
+//
+// Run `sing-box check -c /etc/sing-box/config.json` after merging. If it
+// complains about "action" or "override_address", use the legacy file instead.
+{
+  "route": {
+    "rules": [
+      // --- works everywhere: match a destination IP, never a name -----------
+      // No DNS involved on either side. The client routes the packet into the
+      // tunnel, this rule matches the destination, sing-box rewrites it.
+      // 198.18.0.0/15 is the RFC 2544 benchmarking range, so it collides with
+      // nothing real. Browse http://198.18.0.77/ once this is in.
+      //
+      // This is the rule to start with. It works for hysteria2 clients in
+      // TUN/VPN mode AND for wireguard peers.
+      {
+        "network": ["tcp"],
+        "ip_cidr": ["198.18.0.77/32"],
+        "port": [80],
+        "action": "route",
+        "outbound": "direct",
+        "override_address": "127.0.0.1",
+        "override_port": 8787
+      },
+
+      // --- proxy inbounds, hostname version ---------------------------------
+      // Only matches when the client hands sing-box the NAME rather than an
+      // address — i.e. a real proxy client (socks5h / HTTP proxy), not TUN mode.
+      // In TUN mode the client resolves awg-admin.internal locally, fails, and
+      // you get "name not resolved" before sing-box ever sees the connection.
+      //
+      // Test it with:  curl -x socks5h://127.0.0.1:2080 http://awg-admin.internal/
+      // The h in socks5h is what makes the proxy resolve instead of curl.
+      {
+        "inbound": ["hy2-in"],
+        "domain": ["awg-admin.internal"],
+        "action": "route",
+        "outbound": "direct",
+        "override_address": "127.0.0.1",
+        "override_port": 8787
+      },
+
+      // --- packet tunnels (wireguard / amneziawg) ---------------------------
+      // A VPN client sends PACKETS to an address, so match the tunnel IP and
+      // port instead. Domains cannot work here without real DNS.
+      //
+      // source_ip_cidr is the access control: listing one peer means only that
+      // peer can reach the app at all. Widen to 10.3.2.0/24 for every peer.
+      {
+        "network": ["tcp"],
+        "source_ip_cidr": ["10.3.2.2/32"],
+        "ip_cidr": ["10.3.2.1/32"],
+        "port": [80],
+        "action": "route",
+        "outbound": "direct",
+        "override_address": "127.0.0.1",
+        "override_port": 8787
+      }
+
+      // ... your existing rules follow ...
+    ],
+
+    // If your final is a tunnel (e.g. "warp"), a rule that fails to match sends
+    // the connection there, and dialing 127.0.0.1 inside a tunnel netstack is
+    // what produces "Martian packet dropped with loopback source address".
+    // That log line means "my rule did not match", not "loopback is wrong".
+    "final": "direct"
+  }
+}
