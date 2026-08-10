@@ -213,7 +213,11 @@ async function api(path, body) {
   const ctype = res.headers.get('Content-Type') || '';
   if (ctype.includes('application/json')) {
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    if (!res.ok) {
+      const err = new Error(data.error || ('HTTP ' + res.status));
+      err.check = data.check;         // sing-box's own output, if it refused
+      throw err;
+    }
     return data;
   }
   if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -910,6 +914,13 @@ async function save() {
     S.dirty = false;
     refresh();
     const notes = [];
+    if (r.check && r.check.status === 'ok') notes.push(t('toast.check_ok'));
+    if (r.check && r.check.status === 'skipped') {
+      notes.push(t('toast.check_skipped', { why: r.check.detail }));
+    }
+    if (r.check && (r.check.status === 'failed' || r.check.status === 'error')) {
+      notes.push(t('toast.check_advisory') + '\n' + r.check.detail);
+    }
     if (r.config_backup) notes.push(t('toast.backup', { path: r.config_backup }));
     if (S.meta.config_has_comments && !r.comments_preserved) {
       notes.push(t('toast.comments_lost'));
@@ -917,7 +928,11 @@ async function save() {
     toast(t('toast.saved', { when: r.saved_at }) +
           (notes.length ? '\n' + notes.join('\n') : ''), 'ok');
   } catch (err) {
-    toast(t('toast.save_failed', { err: err.message || err }), 'err');
+    if (err.check) {
+      toast(t('toast.check_rejected') + '\n\n' + (err.check.detail || ''), 'err');
+    } else {
+      toast(t('toast.save_failed', { err: err.message || err }), 'err');
+    }
   }
 }
 

@@ -49,8 +49,32 @@
   // just dropping another JSON file into static/i18n.
   "language": "en",
 
-  // Timestamped copies of config.json kept beside it on every save.
+  // Timestamped copies of config.json and the vault, kept on every save.
   "keep_backups": 10,
+  "backup_dir": "/var/backups/awg-endpoints",
+
+  // Scratch space for the pre-write check below. Empty means the system temp
+  // directory — under systemd that is a private /tmp belonging to this service
+  // (PrivateTmp=yes), which is exactly where a config full of private keys
+  // should be staged. Set a path only if you want it elsewhere.
+  "temp_dir": "",
+
+  // Before overwriting config.json, write the candidate to a throwaway
+  // directory and hand it to `sing-box check`. If sing-box refuses it, nothing
+  // is written and the error comes back to the browser.
+  //
+  // mode:  "auto"      directory mode when other *.json sit next to the config
+  //                    (that is how `sing-box run -C` loads them), else file
+  //        "file"      always `check -c <candidate>`
+  //        "directory" always `check -C <staged copy of the whole directory>`
+  // strict: true blocks the save on failure; false saves anyway and warns.
+  "validate": {
+    "enabled": true,
+    "binary": "sing-box",
+    "mode": "auto",
+    "timeout": 30,
+    "strict": true
+  },
 
   // Serve the editor but refuse to write anything. Useful for a look around.
   "read_only": false,

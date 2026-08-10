@@ -95,6 +95,10 @@
   "toast.no_free": "No free addresses left in the subnet.",
   "toast.load_failed": "Could not load state — {err}",
   "toast.save_failed": "Save failed — {err}",
+  "toast.check_ok": "sing-box accepted the config",
+  "toast.check_skipped": "not checked: {why}",
+  "toast.check_advisory": "sing-box reported a problem (saved anyway, strict is off):",
+  "toast.check_rejected": "sing-box rejected the config — nothing was written:",
 
   "confirm.discard": "Discard unsaved changes and reload from disk?",
   "confirm.restart": "Restart sing-box now?",

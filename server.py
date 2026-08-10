@@ -22,7 +22,9 @@ import io
 import json
 import os
 import posixpath
+import re
 import shlex
+import shutil
 import ssl
 import subprocess
 import sys
@@ -351,44 +353,54 @@ def read_json(path, default):
     return data, True, had_comments
 
 
-def write_config(path, config, keep_backups):
-    """Write config.json, keeping comments outside the endpoints array intact.
+def render_config(path, config):
+    """Produce the exact text that should replace config.json, keeping comments
+    outside the endpoints array intact.
 
     Falls back to a plain re-serialisation when the file has no endpoints key,
     or when the spliced text does not parse back to exactly what we intended.
-    Returns (backup_path, comments_preserved).
+    Returns (text, comments_preserved).
     """
-    text = None
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
             original = fh.read()
         try:
             candidate = splice_endpoints(original, config)
             if candidate is not None and parse_jsonc(candidate)[0] == config:
-                text = candidate
+                return candidate, True
         except Exception:                              # noqa: BLE001
-            text = None                                # fall through to rewrite
-    if text is None:
-        return write_json(path, config, keep_backups), False
-    return write_json(path, config, keep_backups, text=text), True
+            pass                                       # fall through to rewrite
+    return json.dumps(config, indent=2, ensure_ascii=False) + "\n", False
 
 
-def write_json(path, data, keep_backups, mode=None, text=None):
-    """Timestamped backup, then atomic replace. Returns backup path or None."""
+def write_json(path, data, keep_backups, mode=None, text=None, backup_dir=None):
+    """Timestamped backup, then atomic replace. Returns backup path or None.
+
+    Backups live in backup_dir (falling back to beside the file). The temp file
+    for the rename must stay in the target directory — os.replace is only atomic
+    within one filesystem.
+    """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
     backup = None
 
     if os.path.exists(path):
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = "%s.bak-%s" % (path, stamp)
+        base = os.path.basename(path)
+        dest_dir = backup_dir or directory
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError:
+            dest_dir = directory
+        backup = os.path.join(dest_dir, "%s.bak-%s" % (base, stamp))
         n = 1
         while os.path.exists(backup):
-            backup = "%s.bak-%s.%d" % (path, stamp, n)
+            backup = os.path.join(dest_dir, "%s.bak-%s.%d" % (base, stamp, n))
             n += 1
         with open(path, "rb") as src, open(backup, "wb") as dst:
             dst.write(src.read())
-        _prune_backups(path, keep_backups)
+        os.chmod(backup, 0o600)
+        _prune_backups(dest_dir, base, keep_backups)
         if mode is None:
             mode = os.stat(path).st_mode & 0o7777
 
@@ -410,16 +422,15 @@ def write_json(path, data, keep_backups, mode=None, text=None):
     return backup
 
 
-def _prune_backups(path, keep):
+def _prune_backups(directory, basename, keep):
     if keep <= 0:
         return
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    base = os.path.basename(path) + ".bak-"
-    found = sorted(
-        (f for f in os.listdir(directory) if f.startswith(base)),
-        reverse=True,
-    )
-    for stale in found[keep:]:
+    prefix = basename + ".bak-"
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for stale in sorted((f for f in names if f.startswith(prefix)), reverse=True)[keep:]:
         try:
             os.unlink(os.path.join(directory, stale))
         except OSError:
@@ -427,6 +438,95 @@ def _prune_backups(path, keep):
 
 
 EMPTY_VAULT = {"version": 1, "endpoints": {}}
+
+
+# --------------------------------------------------------------------------
+# Pre-flight: hand the candidate config to sing-box before writing it
+# --------------------------------------------------------------------------
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+class CheckResult:
+    def __init__(self, status, detail="", command=""):
+        self.status = status          # "ok" | "failed" | "skipped" | "error"
+        self.detail = detail
+        self.command = command
+
+    def as_dict(self):
+        return {"status": self.status, "detail": self.detail, "command": self.command}
+
+
+def singbox_check(candidate_text, opts):
+    """Write the candidate to a throwaway directory and run `sing-box check`.
+
+    In directory mode sing-box merges every *.json in its config directory, so
+    checking our file alone would validate something other than what the daemon
+    will actually load. We stage copies of the siblings alongside the candidate
+    and check the whole directory.
+    """
+    if not opts.validate_enabled:
+        return CheckResult("skipped", "validation disabled in config")
+    binary = shutil.which(opts.validate_binary) if opts.validate_binary else None
+    if not binary:
+        return CheckResult("skipped", "%r not found in PATH" % opts.validate_binary)
+
+    cfg_path = os.path.abspath(opts.config)
+    cfg_dir = os.path.dirname(cfg_path)
+    base = os.path.basename(cfg_path)
+
+    mode = opts.validate_mode
+    if mode == "auto":
+        try:
+            siblings = [f for f in os.listdir(cfg_dir)
+                        if f.endswith(".json") and f != base]
+        except OSError:
+            siblings = []
+        mode = "directory" if siblings else "file"
+
+    staging = tempfile.mkdtemp(prefix="awg-check-", dir=opts.temp_dir or None)
+    try:
+        os.chmod(staging, 0o700)          # the candidate carries private keys
+        target = os.path.join(staging, base)
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(candidate_text)
+        os.chmod(target, 0o600)
+
+        if mode == "directory":
+            for name in os.listdir(cfg_dir):
+                if not name.endswith(".json") or name == base:
+                    continue
+                try:
+                    shutil.copyfile(os.path.join(cfg_dir, name),
+                                    os.path.join(staging, name))
+                    os.chmod(os.path.join(staging, name), 0o600)
+                except OSError:
+                    pass
+            cmd = [binary, "check", "--disable-color", "-C", staging]
+        else:
+            cmd = [binary, "check", "--disable-color", "-c", target]
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=max(1, int(opts.validate_timeout)))
+        except subprocess.TimeoutExpired:
+            return CheckResult("error", "sing-box check timed out after %ss"
+                               % opts.validate_timeout, " ".join(cmd))
+        except OSError as exc:
+            return CheckResult("error", "could not run sing-box: %s" % exc, " ".join(cmd))
+
+        output = ((proc.stderr or "") + (proc.stdout or "")).strip()
+        # Paths in the output point at the staging copy; say what it really is.
+        output = output.replace(staging, "<candidate>")
+        # Older builds ignore --disable-color, so strip escapes regardless —
+        # this text ends up in a browser toast.
+        output = ANSI_ESCAPE.sub("", output)
+        if proc.returncode == 0:
+            return CheckResult("ok", output, " ".join(cmd))
+        return CheckResult("failed", output or "exit code %d" % proc.returncode,
+                           " ".join(cmd))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 I18N_DIR = os.path.join(STATIC_DIR, "i18n")
 
@@ -741,14 +841,28 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(vault, dict):
             vault = json.loads(json.dumps(EMPTY_VAULT))
 
-        cfg_backup, comments_kept = write_config(
-            opts.config, canonicalize(config), opts.keep_backups)
-        vault_backup = write_json(opts.vault, vault, opts.keep_backups, mode=0o600)
+        text, comments_kept = render_config(opts.config, canonicalize(config))
+
+        # Nothing has been touched on disk yet. If sing-box rejects the
+        # candidate, stop here rather than leaving the daemon a config it
+        # cannot load.
+        check = singbox_check(text, opts)
+        if check.status in ("failed", "error") and opts.validate_strict:
+            return self._json(422, {
+                "error": "sing-box rejected the configuration; nothing was written",
+                "check": check.as_dict(),
+            })
+
+        cfg_backup = write_json(opts.config, config, opts.keep_backups,
+                                text=text, backup_dir=opts.backup_dir)
+        vault_backup = write_json(opts.vault, vault, opts.keep_backups,
+                                  mode=0o600, backup_dir=opts.backup_dir)
         self._json(200, {
             "ok": True,
             "config_backup": cfg_backup,
             "vault_backup": vault_backup,
             "comments_preserved": comments_kept,
+            "check": check.as_dict(),
             "saved_at": datetime.now().isoformat(timespec="seconds"),
         })
 
@@ -821,6 +935,15 @@ SETTING_DEFAULTS = {
     "restart_cmd": "",
     "allow_insecure": False,
     "language": "en",
+    "backup_dir": "/var/backups/awg-endpoints",
+    "temp_dir": "",
+    "validate": {
+        "enabled": True,
+        "binary": "sing-box",
+        "mode": "auto",
+        "timeout": 30,
+        "strict": True,
+    },
     "auth": {"user": "", "password": "", "password_file": ""},
     "tls": {"cert": "", "key": ""},
 }
@@ -846,7 +969,7 @@ def load_settings(path, required):
     if unknown:
         raise SystemExit("%s: unknown setting(s) %s\nvalid settings: %s" % (
             path, ", ".join(sorted(unknown)), ", ".join(sorted(SETTING_DEFAULTS))))
-    for section in ("auth", "tls"):
+    for section in ("auth", "tls", "validate"):
         if section in data:
             if not isinstance(data[section], dict):
                 raise SystemExit("%s: '%s' must be an object" % (path, section))
@@ -888,6 +1011,18 @@ def build_options(argv):
                     help="permit binding a non-loopback address without auth")
     ap.add_argument("--language", default=None,
                     help="default UI language, e.g. en or ru")
+    ap.add_argument("--backup-dir", default=None,
+                    help="where timestamped backups are kept")
+    ap.add_argument("--temp-dir", default=None,
+                    help="scratch directory for the pre-write sing-box check "
+                         "(default: system temp)")
+    ap.add_argument("--singbox-bin", dest="singbox_bin", default=None,
+                    help="sing-box binary used for the pre-write check")
+    ap.add_argument("--check-mode", dest="check_mode", default=None,
+                    choices=["auto", "file", "directory"],
+                    help="how to stage the check (default: auto)")
+    ap.add_argument("--no-validate", dest="validate", action="store_false", default=None,
+                    help="do not run sing-box check before writing")
     args = ap.parse_args(argv)
 
     if args.hash_password:
@@ -920,6 +1055,13 @@ def build_options(argv):
         restart_cmd=pick("restart_cmd", args.restart_cmd),
         allow_insecure=bool(pick("allow_insecure", args.allow_insecure)),
         language=pick("language", args.language),
+        backup_dir=pick("backup_dir", args.backup_dir),
+        temp_dir=pick("temp_dir", args.temp_dir),
+        validate_enabled=bool(pick("enabled", args.validate, "validate")),
+        validate_binary=pick("binary", args.singbox_bin, "validate"),
+        validate_mode=pick("mode", args.check_mode, "validate"),
+        validate_timeout=pick("timeout", None, "validate"),
+        validate_strict=bool(pick("strict", None, "validate")),
         tls_cert=pick("cert", args.tls_cert, "tls"),
         tls_key=pick("key", args.tls_key, "tls"),
         auth=args.auth,
@@ -971,6 +1113,15 @@ def main(argv=None):
         print("  auth   : %s" % ("user '%s'" % creds[0] if creds else "NONE"))
         print("  restart: %s" % (opts.restart_cmd or "disabled"))
         print("  language: %s (available: %s)" % (opts.language, ", ".join(codes) or "none"))
+        print("  backups: %s" % opts.backup_dir)
+        print("  tempdir: %s" % (opts.temp_dir or tempfile.gettempdir()))
+        found = shutil.which(opts.validate_binary) if opts.validate_binary else None
+        print("  check  : %s" % (
+            "disabled" if not opts.validate_enabled
+            else ("%s (mode %s, %s)" % (found, opts.validate_mode,
+                                        "blocking" if opts.validate_strict else "advisory"))
+            if found else "%r NOT FOUND — saves will not be checked"
+                         % opts.validate_binary))
         for label, path in (("sing_box_config", opts.config), ("vault", opts.vault)):
             if not os.path.exists(path):
                 print("  note   : %s does not exist yet (%s)" % (label, path))

@@ -17,6 +17,7 @@ SVC_USER=awg-endpoints
 SB_CONFIG=/etc/sing-box/config.json
 STATE_DIR=/var/lib/awg-endpoints
 SB_VAULT=$STATE_DIR/vault.json
+BACKUP_DIR=/var/backups/awg-endpoints
 SB_SERVICE=sing-box.service
 HOST=127.0.0.1
 PORT=8787
@@ -181,6 +182,18 @@ else
   say "restart hook disabled"
 fi
 
+# --- pre-write validation ----------------------------------------------------
+
+# Record the absolute path so the sandboxed service does not depend on PATH.
+SINGBOX_BIN="$(command -v sing-box || true)"
+if [ -n "$SINGBOX_BIN" ]; then
+  say "found sing-box at $SINGBOX_BIN — saves will be checked before writing"
+else
+  SINGBOX_BIN=sing-box
+  say "WARNING: sing-box not found in PATH; saves will not be pre-checked"
+  say "  set validate.binary in $CONF_DIR/config.json once you know the path"
+fi
+
 # --- config file -------------------------------------------------------------
 
 install -d -m 0750 -o root -g "$SVC_GROUP" "$CONF_DIR"
@@ -208,6 +221,8 @@ text = setval(text, "user",            '"$ADMIN_USER"')
 text = setval(text, "password",        '"$HASH"')
 text = setval(text, "restart_cmd",     '"$RESTART_CMD"')
 text = setval(text, "language",        '"$LANGUAGE"')
+text = setval(text, "backup_dir",      '"$BACKUP_DIR"')
+text = setval(text, "binary",          '"$SINGBOX_BIN"')
 open(dst, "w", encoding="utf-8").write(text)
 PY
 chown root:"$SVC_GROUP" "$CONF_FILE"
@@ -260,6 +275,8 @@ if [ "$SB_RUNS_AS" != root ] &&
 fi
 
 install -d -m 0750 -o "$SVC_USER" -g "$SVC_GROUP" "$VAULT_DIR"
+install -d -m 0750 -o "$SVC_USER" -g "$SVC_GROUP" "$BACKUP_DIR"
+say "backups will go to $BACKUP_DIR"
 if [ ! -f "$SB_VAULT" ]; then
   install -m 0600 -o "$SVC_USER" -g "$SVC_GROUP" /dev/null "$SB_VAULT"
   printf '{\n  "version": 1,\n  "endpoints": {}\n}\n' > "$SB_VAULT"
@@ -282,7 +299,7 @@ fi
 
 # --- unit --------------------------------------------------------------------
 
-RW_PATHS="$SB_DIR $VAULT_DIR"
+RW_PATHS="$SB_DIR $VAULT_DIR $BACKUP_DIR"
 
 UNIT=/etc/systemd/system/$SERVICE_NAME.service
 sed -e "s|__PREFIX__|$PREFIX|g" \

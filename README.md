@@ -30,6 +30,7 @@ if you really mean it — those client keys have no other copy).
 | app | `/opt/awg-endpoints` |
 | **configuration** | `/etc/awg-endpoints/config.json`, `0640 root:awg-endpoints` |
 | vault | `/var/lib/awg-endpoints/vault.json`, `0600` |
+| backups | `/var/backups/awg-endpoints/`, `0600` |
 | unit | `/etc/systemd/system/awg-endpoints.service` |
 
 ## Configuration
@@ -59,6 +60,13 @@ sudo -u awg-endpoints python3 /opt/awg-endpoints/server.py \
 | `auth.password` | — | pbkdf2 string, or a literal password |
 | `auth.password_file` | — | read `user:password` from elsewhere instead |
 | `keep_backups` | `10` | timestamped copies of `config.json` |
+| `backup_dir` | `/var/backups/awg-endpoints` | where those copies go |
+| `temp_dir` | system temp | scratch space for the pre-write check |
+| `validate.enabled` | `true` | run `sing-box check` before writing |
+| `validate.binary` | `sing-box` | which binary to run |
+| `validate.mode` | `auto` | `auto`, `file` or `directory` staging |
+| `validate.timeout` | `30` | seconds before giving up |
+| `validate.strict` | `true` | a failed check blocks the save |
 | `read_only` | `false` | serve the editor, refuse to write |
 | `restart_cmd` | — | command behind the Restart button |
 | `language` | `en` | default UI language |
@@ -267,10 +275,42 @@ comments, and the save toast tells you if a full rewrite happened.
 
 ## Saving
 
-Save writes both files: the existing `config.json` is copied to
-`config.json.bak-YYYYmmdd-HHMMSS` first, then replaced atomically via
-`os.replace`. Only the `endpoints` array is rebuilt; every other section keeps its
-structure, order and comments. Old backups beyond `--keep-backups` are pruned.
+Every save goes through the same sequence:
+
+1. **Render** the new `config.json` text — splicing the endpoints array into the
+   original so comments elsewhere survive.
+2. **Check it with sing-box**, before anything on disk is touched.
+3. **Back up** the current file to `/var/backups/awg-endpoints/`.
+4. **Replace** atomically via `os.replace`.
+
+Only the `endpoints` array is rebuilt; every other section keeps its structure,
+order and comments. Backups beyond `keep_backups` are pruned, oldest first, and
+written `0600` — they contain the server private key.
+
+### The pre-write check
+
+The candidate is written to a throwaway directory and handed to
+`sing-box check`. If sing-box refuses it, **nothing is written** and its exact
+output comes back to the browser. This is what stops the editor from ever
+handing the daemon a config it cannot load.
+
+The staging mirrors how sing-box actually loads your config. In `auto` mode, if
+other `*.json` files sit next to `config.json` — which is how
+`sing-box run -C /etc/sing-box` works — their copies are staged alongside the
+candidate and the whole directory is checked. That matters: a config that passes
+on its own can still fail once merged, for instance if a sibling file declares a
+duplicate outbound tag. Checking the file alone would miss it.
+
+The scratch directory is the system temp by default. Under systemd that is a
+private `/tmp` belonging to this service (`PrivateTmp=yes`), which is where a
+candidate full of private keys should be staged; it is `0700` and removed
+afterwards either way. Set `temp_dir` to move it.
+
+`validate.strict` decides what a failure means. `true` (the default) blocks the
+save. `false` saves anyway and shows the complaint as a warning — useful if
+something *else* in your config directory is already broken and would otherwise
+block every save you make. Set `validate.enabled` to `false` to skip the check
+entirely; the installer warns at install time if it cannot find the binary.
 
 Changes do not reach the running daemon until sing-box reloads. Start with
 `--restart-cmd 'systemctl restart sing-box'` to get a Restart button.

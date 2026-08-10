@@ -95,6 +95,10 @@
   "toast.no_free": "В подсети не осталось свободных адресов.",
   "toast.load_failed": "Не удалось загрузить состояние — {err}",
   "toast.save_failed": "Не удалось сохранить — {err}",
+  "toast.check_ok": "sing-box принял конфигурацию",
+  "toast.check_skipped": "проверка не выполнялась: {why}",
+  "toast.check_advisory": "sing-box сообщил о проблеме (сохранено всё равно, строгий режим выключен):",
+  "toast.check_rejected": "sing-box отклонил конфигурацию — ничего не записано:",
 
   "confirm.discard": "Отбросить несохранённые изменения и перечитать с диска?",
   "confirm.restart": "Перезапустить sing-box сейчас?",
